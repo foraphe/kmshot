@@ -388,6 +388,27 @@ static void log_panel_orientation(int card_fd, uint32_t plane_id)
               << " [" << flags << "]\n";
 }
 
+static const char *hdr_eotf_to_string(uint8_t eotf)
+{
+    switch (eotf)
+    {
+    case 0: return "TRADITIONAL_GAMMA_SDR";
+    case 1: return "TRADITIONAL_GAMMA_HDR";
+    case 2: return "SMPTE_ST2084";
+    case 3: return "ARIB_STD_B67";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *hdr_metadata_type_to_string(uint8_t metadata_type)
+{
+    switch (metadata_type)
+    {
+    case 0: return "STATIC_METADATA_TYPE_1";
+    default: return "UNKNOWN";
+    }
+}
+
 static void log_hdr_metadata(int card_fd, uint32_t connector_id)
 {
     auto hdr_blob_id = get_object_prop_u64(card_fd, connector_id, DRM_MODE_OBJECT_CONNECTOR, "HDR_OUTPUT_METADATA");
@@ -420,13 +441,22 @@ static void log_hdr_metadata(int card_fd, uint32_t connector_id)
     }
 
     auto *raw = reinterpret_cast<const hdr_output_metadata *>(blob->data);
-    std::cerr << "HDR metadata_type=" << raw->metadata_type
-              << " eotf=" << static_cast<uint32_t>(raw->hdmi_metadata_type1.eotf)
-              << " metadata_type1=" << static_cast<uint32_t>(raw->hdmi_metadata_type1.metadata_type)
-              << " max_cll=" << raw->hdmi_metadata_type1.max_cll
-              << " max_fall=" << raw->hdmi_metadata_type1.max_fall
-              << " max_luma=" << raw->hdmi_metadata_type1.max_display_mastering_luminance
-              << " min_luma=" << raw->hdmi_metadata_type1.min_display_mastering_luminance
+    const auto eotf = static_cast<uint8_t>(raw->hdmi_metadata_type1.eotf);
+    const auto metadata_type = static_cast<uint8_t>(raw->hdmi_metadata_type1.metadata_type);
+    const auto max_cll = static_cast<uint32_t>(raw->hdmi_metadata_type1.max_cll);
+    const auto max_fall = static_cast<uint32_t>(raw->hdmi_metadata_type1.max_fall);
+    const auto max_luma = static_cast<uint32_t>(raw->hdmi_metadata_type1.max_display_mastering_luminance);
+    const auto min_luma = static_cast<uint32_t>(raw->hdmi_metadata_type1.min_display_mastering_luminance);
+
+    std::cerr << "HDR metadata:"
+              << " metadata_type=" << static_cast<uint32_t>(metadata_type)
+              << " (" << hdr_metadata_type_to_string(metadata_type) << ")"
+              << " eotf=" << static_cast<uint32_t>(eotf)
+              << " (" << hdr_eotf_to_string(eotf) << ")"
+              << " max_cll=" << max_cll
+              << " max_fall=" << max_fall
+              << " max_luma=" << max_luma
+              << " min_luma=" << min_luma
               << "\n";
 }
 

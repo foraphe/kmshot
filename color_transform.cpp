@@ -181,6 +181,9 @@ bool transform_rgba32f_to_yuv444p10(
     u.resize(px);
     v.resize(px);
 
+    const bool is_kde = (std::getenv("XDG_CURRENT_DESKTOP") != nullptr) &&
+                  (std::string(std::getenv("XDG_CURRENT_DESKTOP")) == "KDE");
+
     // 9 = BT.2020 RGB HDR (PQ), 0 = monitor primaries SDR
     const bool use_hdr_pq_bt2020 = (colorspace_idx == 9);
     const bool use_monitor_primaries_sdr = (colorspace_idx == 0) && !use_hdr_pq_bt2020;
@@ -218,28 +221,52 @@ bool transform_rgba32f_to_yuv444p10(
               << ", SDR CMS target: "
               << (use_monitor_primaries_sdr ? (sdr_target_bt2020 ? "BT.2020" : "Rec.709") : "N/A")
               << "\n";
+    std::cerr << "Detected desktop environment: " << (is_kde ? "KDE" : "non-KDE") << "\n";
 
     for (size_t i = 0; i < px; ++i)
     {
-        double r = clamp01d(static_cast<double>(rgba[i * 4 + 0]));
-        double g = clamp01d(static_cast<double>(rgba[i * 4 + 1]));
-        double b = clamp01d(static_cast<double>(rgba[i * 4 + 2]));
+        // double r = clamp01d(static_cast<double>(rgba[i * 4 + 0]));
+        // double g = clamp01d(static_cast<double>(rgba[i * 4 + 1]));
+        // double b = clamp01d(static_cast<double>(rgba[i * 4 + 2]));
+
+        // not clamping here since I don't know if there are compositors out there that would use scRGB
+        // leaving clamping for actual compositor-specific implementations
+        double r = static_cast<double>(rgba[i * 4 + 0]);
+        double g = static_cast<double>(rgba[i * 4 + 1]);
+        double b = static_cast<double>(rgba[i * 4 + 2]);
 
         if (use_hdr_pq_bt2020)
         {
-            r = std::pow(r, 2.2);
-            g = std::pow(g, 2.2);
-            b = std::pow(b, 2.2);
+            if (is_kde)
+            {
+                // power law 2.2 encoding on KDE
+                // We needed to convert those pixels back to PQ
+                r = clamp01d(r);
+                g = clamp01d(g);
+                b = clamp01d(b);
 
-            r *= pq_scale; g *= pq_scale; b *= pq_scale;
+                r = gamma22_to_linear(r);
+                g = gamma22_to_linear(g);
+                b = gamma22_to_linear(b);
 
-            r = static_cast<double>(linear_to_pq(static_cast<float>(r)));
-            g = static_cast<double>(linear_to_pq(static_cast<float>(g)));
-            b = static_cast<double>(linear_to_pq(static_cast<float>(b)));
+                r *= pq_scale; g *= pq_scale; b *= pq_scale;
+
+                r = static_cast<double>(linear_to_pq(static_cast<float>(r)));
+                g = static_cast<double>(linear_to_pq(static_cast<float>(g)));
+                b = static_cast<double>(linear_to_pq(static_cast<float>(b)));
+            }
+            else
+            {
+                // On Gnome and Hyprland it seemed pixel values are already PQ-encoded
+                // Not sure if everyone else does this though, given how KDE behaved
+                // [TODO] verify on more compositors, check if additional implementations are needed
+            }     
         }
         else if (use_monitor_primaries_sdr)
         {
             // Decode monitor gamma 2.2 -> monitor linear
+            // This part seemed fine on non-KDE
+            // even though technically sRGB curve is a bit different from pure power law
             double r_lin = gamma22_to_linear(r);
             double g_lin = gamma22_to_linear(g);
             double b_lin = gamma22_to_linear(b);

@@ -1,6 +1,6 @@
 # KMShot
 KMShot is an experimental screenshot tool for Linux, written in C++. It reads from the DRM subsystem similar to how [Sunshine](https://github.com/LizardByte/Sunshine)'s `kmsgrab` capture works.
-This tool can be used to capture wide color gamut screenshots or HDR content in higher-than-8-bit color depths, tested on KDE Plasma Wayland session and an AMD GPU.
+This tool can be used to capture wide color gamut screenshots or HDR content in higher-than-8-bit color depths, tested on KDE Plasma, Gnome, and Hyprland.
 
 ### Building
 KMShot uses CMake as its build system. To build the project, headers for DRM, GBM, EGL, GLES2, and LittleCMS 2 need to be installed. You can build it using the following commands:
