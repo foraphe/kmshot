@@ -178,6 +178,9 @@ std::optional<ColorTransformConfig> build_color_transform(
                      "ignoring it for Colorspace=" << colorspace_idx << "\n";
     }
 
+    // KDE blends with pure gamma 2.2 at "default" instead of PQ and then re-encodes using VCGT.
+    // We take the capture before the VCGT step, so a gamma 2.2 -> PQ conversion is needed.
+    // Other compositors tested (Gnome, Hyprland) does not do this.
     if (hdr_pq)
         cfg.pq_input_is_gamma22 = resolve_pq_input_is_gamma22(opts);
 
@@ -208,7 +211,7 @@ std::optional<ColorTransformConfig> build_color_transform(
         std::cerr << "assumed " << target->name << " (no gamut conversion)\n";
         break;
     }
-    std::cerr << "  output: full-range YUV444 10-bit, " << (target_bt2020 ? "BT.2020" : "BT.709")
+    std::cerr << "  output: full-range YUV444 16-bit, " << (target_bt2020 ? "BT.2020" : "BT.709")
               << " matrix\n";
 
     return cfg;

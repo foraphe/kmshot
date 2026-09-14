@@ -51,8 +51,8 @@ float linear_to_pq(float linear);
 Mat3 target_rgb_to_yuv_matrix(bool bt2020);
 
 // Input: interleaved RGBA float buffer, normalized to ~[0..1] per channel.
-// Output: full-range YUV444 10-bit planar (stored in uint16_t, values 0..1023).
-bool transform_rgba32f_to_yuv444p10(
+// Output: full-range YUV444 16-bit planar (stored in uint16_t, values 0..65535).
+bool transform_rgba32f_to_yuv444p16(
     const float *rgba,
     uint32_t width,
     uint32_t height,

@@ -7,7 +7,7 @@
 namespace kmshot
 {
 
-// YUV4MPEG2 container helpers for full-range 10-bit YUV444 planar frames.
+// YUV4MPEG2 container helpers for full-range 16-bit YUV444 planar frames.
 bool write_y4m_header(
     std::ostream &os,
     uint32_t width,

@@ -19,7 +19,7 @@ bool write_y4m_header(
         "YUV4MPEG2 W" + std::to_string(width) +
         " H" + std::to_string(height) +
         " F" + std::to_string(fps_num) + ":" + std::to_string(fps_den) +
-        " Ip C444p10 XYSCSS=444P10 XCOLORRANGE=FULL\n";
+        " Ip C444p16 XYSCSS=444P16 XCOLORRANGE=FULL\n";
     os.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
     return static_cast<bool>(os);
 }

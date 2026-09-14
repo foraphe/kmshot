@@ -90,7 +90,7 @@ if(KMSHOT_BUILD_TESTS)
   target_link_libraries(kmshot_crop_test PRIVATE kmshot_core)
   add_test(NAME crop_rect COMMAND kmshot_crop_test)
 
-  # Numeric checks for the RGBA -> YUV444P10 pipeline.
+  # Numeric checks for the RGBA -> YUV444P16 pipeline.
   add_executable(kmshot_color_transform_test tests/color_transform_test.cpp)
   target_compile_options(kmshot_color_transform_test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(kmshot_color_transform_test PRIVATE kmshot_core)

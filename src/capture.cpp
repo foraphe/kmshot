@@ -267,7 +267,7 @@ int run_capture(const Options &opts,
     const auto frame_delay = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
     std::vector<float> rgba32f;
     std::vector<uint16_t> rgba16;
-    std::vector<uint16_t> y10, u10, v10;
+    std::vector<uint16_t> y16, u16, v16;
     bool y4m_header_written = false;
 
     uint32_t out_w = 0, out_h = 0;
@@ -420,8 +420,8 @@ int run_capture(const Options &opts,
 
         if (opts.pp_y4m)
         {
-            if (!transform_rgba32f_to_yuv444p10(
-                    rgba32f.data(), frame_w, frame_h, color, y10, u10, v10))
+            if (!transform_rgba32f_to_yuv444p16(
+                    rgba32f.data(), frame_w, frame_h, color, y16, u16, v16))
             {
                 std::this_thread::sleep_for(frame_delay);
                 continue;
@@ -437,7 +437,7 @@ int run_capture(const Options &opts,
                 y4m_header_written = true;
             }
 
-            if (!write_y4m_frame(os, y10, u10, v10))
+            if (!write_y4m_frame(os, y16, u16, v16))
                 return 1;
         }
         else

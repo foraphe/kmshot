@@ -463,6 +463,8 @@ bool DmabufGlReader::ensure_readback_target(uint32_t w, uint32_t h)
             {
                 glViewport(0, 0, 1, 1);
                 // < 1/255 so an 8-bit target quantizes to 0 while FP32 keeps it.
+                // This only verifies if we have at least ~9 bits of precision
+                // [FIXME] check for at least F16 precision instead of anything above 8 
                 const float testv = 0.001f;
                 glClearColor(testv, testv, testv, testv);
                 glClear(GL_COLOR_BUFFER_BIT);

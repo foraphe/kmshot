@@ -15,9 +15,9 @@ inline double clamp01d(double v)
     return std::min(1.0, std::max(0.0, v));
 }
 
-inline uint16_t q10(double v01)
+inline uint16_t q16(double v01)
 {
-    const double q = clamp01d(v01) * 1023.0;
+    const double q = clamp01d(v01) * 65535.0;
     return static_cast<uint16_t>(std::llround(q));
 }
 
@@ -77,7 +77,7 @@ Mat3 target_rgb_to_yuv_matrix(bool bt2020)
     return m;
 }
 
-bool transform_rgba32f_to_yuv444p10(
+bool transform_rgba32f_to_yuv444p16(
     const float *rgba,
     uint32_t width,
     uint32_t height,
@@ -141,9 +141,9 @@ bool transform_rgba32f_to_yuv444p10(
         const double uu = r * m.m[1][0] + g * m.m[1][1] + b * m.m[1][2];
         const double vv = r * m.m[2][0] + g * m.m[2][1] + b * m.m[2][2];
 
-        y[i] = q10(yy);
-        u[i] = q10(uu + 0.5);
-        v[i] = q10(vv + 0.5);
+        y[i] = q16(yy);
+        u[i] = q16(uu + 0.5);
+        v[i] = q16(vv + 0.5);
     }
 
     return true;

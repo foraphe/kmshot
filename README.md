@@ -27,7 +27,7 @@ The checks cover the EDID decoder (against a real panel, cross-checked with `edi
 | `src/capture.*` | Capture loop, slurp crop geometry, raw RGBA output |
 | `src/color_math.*` | 3x3 matrix math, gamut presets, LittleCMS2 matrix extraction |
 | `src/color_profile.*` | Resolves display primaries + target space into a transform |
-| `src/color_transform.*` | RGBA -> YUV444P10 conversion and PQ helpers |
+| `src/color_transform.*` | RGBA -> YUV444P16 conversion and PQ helpers |
 | `src/edid.*` | EDID base block + CTA-861 extension parser |
 | `src/y4m.*` | YUV4MPEG2 container writer |
 | `tests/`, `tools/` | Self-checks |
@@ -35,7 +35,7 @@ The checks cover the EDID decoder (against a real panel, cross-checked with `edi
 ### Usage
 To use this tool, the executable will need to either have `cap_sys_admin` or run as root.
 Example usage (assuming `slurp` and `avifenc` are installed and in PATH):
-SDR 10bpc YUV444 capture into AVIF (needs caution, see "Important Notes on Color Accuracy" below):
+SDR YUV444 capture into a 10bpc AVIF (needs caution, see "Important Notes on Color Accuracy" below, and the Y4M bit-depth caveat after the HDR example):
 ```bash
 slurp |\
 sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
@@ -51,6 +51,8 @@ sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
 avifenc -q 100 --stdin output_hdr.avif --depth 10 --yuv 444 --cicp 9/16/9 --clli <MaxCLL,MaxFALL> --range full
 ```
 Being a screenshot tool, the captured frame would likely not be a well behaved, singular HDR image and instead might contain a mix of SDR (e.g. UI) and HDR content. In this case, it's currently recommended to set the MaxCLL/MaxFALL values according to the monitor's capabilities, so that the screenshot would look similar to the source content, when viewed on a 10000-nit reference display (or displays that have better capabilities than the monitor used for capture). However, this needs further testing, and no testing has been done on setting the values other than the monitor's capabilities.
+
+> **Y4M bit-depth caveat:** `--pp-y4m` currently writes 16-bit samples (`C444p16`). `avifenc`'s Y4M reader accepts only 8, 10 or 12-bit input (and requires `--depth` to match it exactly), so it rejects the current output with `Unsupported y4m pixel format` and the two `| avifenc` examples above do not run as-is. `ffmpeg` does read the 16-bit Y4M correctly.
 
 Experimental 12bpc capture of linear RGB data into an 16bpc PNG (requires `ffmpeg`, and this WILL look wrong perceptually). The gamma used to linearize the values follows `--display-gamma` (default 2.2):
 ```bash
@@ -121,7 +123,7 @@ Capture
   --slurp-scale S|SX,SY   Scale slurp's logical coordinates to framebuffer pixels
 
 Output format
-  --pp-y4m                Write full-range 10-bit YUV444 (Y4M) instead of RGBA64
+  --pp-y4m                Write full-range 16-bit YUV444 (Y4M) instead of RGBA64
   --sdr-linear-12bpc      Raw path only: decode --display-gamma and store 12-bit MSB-aligned
   --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)
 

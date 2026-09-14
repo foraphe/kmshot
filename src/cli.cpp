@@ -74,7 +74,7 @@ void print_usage(std::ostream &os, const char *argv0)
        << "  --slurp-scale S|SX,SY   Scale slurp's logical coordinates to framebuffer pixels\n"
        << "\n"
        << "Output format\n"
-       << "  --pp-y4m                Write full-range 10-bit YUV444 (Y4M) instead of RGBA64\n"
+       << "  --pp-y4m                Write full-range 16-bit YUV444 (Y4M) instead of RGBA64\n"
        << "  --sdr-linear-12bpc      Raw path only: decode --display-gamma and store 12-bit MSB-aligned\n"
        << "  --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)\n"
        << "\n"
