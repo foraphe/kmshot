@@ -86,22 +86,27 @@ DisplayProfile resolve_display_profile(const Options &opts, const std::optional<
 {
     DisplayProfile profile;
 
-    if (!opts.display_gamut.empty())
+    const GamutPreset *requested =
+        opts.display_gamut.empty() ? nullptr : find_gamut_preset(opts.display_gamut);
+
+    if (requested)
     {
-        const GamutPreset *preset = find_gamut_preset(opts.display_gamut);
-        profile.chroma = preset->chroma;
-        profile.origin = std::string("--display-gamut ") + preset->name;
+        profile.chroma = requested->chroma;
+        profile.origin = std::string("--display-gamut ") + requested->name;
     }
     else if (opts.use_edid && edid && edid->valid && edid->has_chromaticities)
     {
         profile.chroma = edid->chroma;
         profile.origin = describe_edid_origin(*edid);
-        profile.from_edid = true;
+    }
+    else if (const GamutPreset *fallback = find_gamut_preset(kFallbackGamut))
+    {
+        profile.chroma = fallback->chroma;
+        profile.origin = "built-in fallback";
     }
     else
     {
-        const GamutPreset *preset = find_gamut_preset(kFallbackGamut);
-        profile.chroma = preset->chroma;
+        // The preset table is a compile-time constant, so this cannot happen.
         profile.origin = "built-in fallback";
     }
 
@@ -115,7 +120,6 @@ DisplayProfile resolve_display_profile(const Options &opts, const std::optional<
         profile.chroma.blue_x = p[4];
         profile.chroma.blue_y = p[5];
         profile.origin += " + --display-primaries";
-        profile.from_edid = false;
     }
 
     if (opts.display_white)
@@ -123,7 +127,6 @@ DisplayProfile resolve_display_profile(const Options &opts, const std::optional<
         profile.chroma.white_x = opts.display_white->first;
         profile.chroma.white_y = opts.display_white->second;
         profile.origin += " + --display-white";
-        profile.from_edid = false;
     }
 
     return profile;

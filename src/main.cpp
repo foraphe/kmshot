@@ -69,7 +69,9 @@ std::optional<EdidInfo> load_edid(const Options &opts,
 
     EdidInfo info;
     parse_edid(blob.data(), blob.size(), info);
-    std::cerr << describe_edid(info);
+    // When --print-edid was requested the caller writes the report to stdout.
+    if (!opts.print_edid)
+        std::cerr << describe_edid(info);
     return info;
 }
 
@@ -176,7 +178,14 @@ int main(int argc, char **argv)
     auto edid = load_edid(opts, card.fd, connector_id);
 
     if (opts.print_edid)
-        return (edid && edid->valid) ? 0 : 1;
+    {
+        if (edid && edid->valid)
+        {
+            std::cout << describe_edid(*edid);
+            return 0;
+        }
+        return 1;
+    }
 
     const DisplayProfile profile = resolve_display_profile(opts, edid);
 

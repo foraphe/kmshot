@@ -15,7 +15,6 @@ struct DisplayProfile
 {
     Chromaticities chroma{};
     std::string origin; // human readable description of where the values came from
-    bool from_edid{false};
 };
 
 // Resolve the display primaries / white point from the command line overrides

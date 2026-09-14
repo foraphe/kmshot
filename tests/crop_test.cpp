@@ -2,6 +2,7 @@
 #include "capture.hpp"
 
 #include <iostream>
+#include <limits>
 #include <string>
 
 using namespace kmshot;
@@ -79,6 +80,14 @@ int main()
                std::nullopt);
     check_rect("non-positive scale",
                compute_crop_rect_for_buffer({0, 0, 10, 10}, 0, 0, 100, 50, 100, 50, 0.0, 1.0),
+               std::nullopt);
+    check_rect("infinite scale",
+               compute_crop_rect_for_buffer({0, 0, 10, 10}, 0, 0, 100, 50, 100, 50,
+                                            std::numeric_limits<double>::infinity(), 1.0),
+               std::nullopt);
+    check_rect("NaN scale",
+               compute_crop_rect_for_buffer({0, 0, 10, 10}, 0, 0, 100, 50, 100, 50,
+                                            std::numeric_limits<double>::quiet_NaN(), 1.0),
                std::nullopt);
 
     if (g_failures != 0)

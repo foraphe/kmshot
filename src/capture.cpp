@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,10 +45,47 @@ uint16_t float01_to_u12_msb16_sat(float v)
     return static_cast<uint16_t>(q12 << 4);
 }
 
+bool parse_i64_strict(const std::string &text, int64_t &out)
+{
+    try
+    {
+        size_t consumed = 0;
+        const long long v = std::stoll(text, &consumed);
+        if (consumed != text.size())
+            return false;
+        out = static_cast<int64_t>(v);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
+bool parse_u64_strict(const std::string &text, uint64_t &out)
+{
+    if (text.empty() || text.front() == '-')
+        return false;
+    try
+    {
+        size_t consumed = 0;
+        const unsigned long long v = std::stoull(text, &consumed);
+        if (consumed != text.size())
+            return false;
+        out = static_cast<uint64_t>(v);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
 // Final quantization for the raw RGBA64 output path.
 void quantize_rgba_output(
     const std::vector<float> &rgba32f,
     bool use_linear12_path,
+    double decode_gamma,
     std::vector<uint16_t> &rgba16)
 {
     rgba16.resize(rgba32f.size());
@@ -60,11 +98,14 @@ void quantize_rgba_output(
 
         if (use_linear12_path)
         {
-            // gamma-encoded blending-space RGB -> linear (gamma 2.2 decode),
-            // quantized to 12-bit and stored MSB-aligned in 16-bit lanes.
-            const float r_lin = std::pow(std::clamp(s[0], 0.0f, 1.0f), 2.2f);
-            const float g_lin = std::pow(std::clamp(s[1], 0.0f, 1.0f), 2.2f);
-            const float b_lin = std::pow(std::clamp(s[2], 0.0f, 1.0f), 2.2f);
+            // gamma-encoded blending-space RGB -> linear, quantized to 12-bit
+            // and stored MSB-aligned in 16-bit lanes.
+            const float r_lin = static_cast<float>(
+                std::pow(std::clamp(static_cast<double>(s[0]), 0.0, 1.0), decode_gamma));
+            const float g_lin = static_cast<float>(
+                std::pow(std::clamp(static_cast<double>(s[1]), 0.0, 1.0), decode_gamma));
+            const float b_lin = static_cast<float>(
+                std::pow(std::clamp(static_cast<double>(s[2]), 0.0, 1.0), decode_gamma));
 
             d[0] = float01_to_u12_msb16_sat(r_lin);
             d[1] = float01_to_u12_msb16_sat(g_lin);
@@ -101,11 +142,17 @@ std::optional<CropRect> compute_crop_rect_for_buffer(
     if (!(slurp_scale_x > 0.0) || !(slurp_scale_y > 0.0))
         return std::nullopt;
 
-    // slurp logical -> physical/global
+    // slurp logical -> physical/global (64-bit to avoid int32 overflow)
     const double slurp_x0 = static_cast<double>(slurp.x) * slurp_scale_x;
     const double slurp_y0 = static_cast<double>(slurp.y) * slurp_scale_y;
-    const double slurp_x1 = static_cast<double>(slurp.x + static_cast<int32_t>(slurp.w)) * slurp_scale_x;
-    const double slurp_y1 = static_cast<double>(slurp.y + static_cast<int32_t>(slurp.h)) * slurp_scale_y;
+    const double slurp_x1 = static_cast<double>(
+        static_cast<int64_t>(slurp.x) + static_cast<int64_t>(slurp.w)) * slurp_scale_x;
+    const double slurp_y1 = static_cast<double>(
+        static_cast<int64_t>(slurp.y) + static_cast<int64_t>(slurp.h)) * slurp_scale_y;
+
+    if (!std::isfinite(slurp_x0) || !std::isfinite(slurp_y0) ||
+        !std::isfinite(slurp_x1) || !std::isfinite(slurp_y1))
+        return std::nullopt;
 
     const double sx = static_cast<double>(buf_w) / static_cast<double>(capture_global_w);
     const double sy = static_cast<double>(buf_h) / static_cast<double>(capture_global_h);
@@ -168,24 +215,30 @@ bool read_region_info(SlurpRegion &region)
         return false;
     }
 
-    try
+    int64_t x = 0;
+    int64_t y = 0;
+    uint64_t w = 0;
+    uint64_t h = 0;
+    if (!parse_i64_strict(pos.substr(0, comma), x) ||
+        !parse_i64_strict(pos.substr(comma + 1), y) ||
+        !parse_u64_strict(size.substr(0, x_pos), w) ||
+        !parse_u64_strict(size.substr(x_pos + 1), h))
     {
-        region.x = static_cast<int32_t>(std::stol(pos.substr(0, comma)));
-        region.y = static_cast<int32_t>(std::stol(pos.substr(comma + 1)));
-        region.w = static_cast<uint32_t>(std::stoul(size.substr(0, x_pos)));
-        region.h = static_cast<uint32_t>(std::stoul(size.substr(x_pos + 1)));
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "Error parsing region info: " << e.what() << "\n";
+        std::cerr << "Error parsing region info (expected \"x,y wxh\")\n";
         return false;
     }
 
-    if (region.w == 0 || region.h == 0)
+    if (x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX ||
+        w == 0 || w > UINT32_MAX || h == 0 || h > UINT32_MAX)
     {
-        std::cerr << "Region has zero width or height\n";
+        std::cerr << "Region info is out of range\n";
         return false;
     }
+
+    region.x = static_cast<int32_t>(x);
+    region.y = static_cast<int32_t>(y);
+    region.w = static_cast<uint32_t>(w);
+    region.h = static_cast<uint32_t>(h);
     return true;
 }
 
@@ -219,6 +272,7 @@ int run_capture(const Options &opts,
 
     uint32_t out_w = 0, out_h = 0;
     uint32_t last_written_w = 0, last_written_h = 0;
+    uint64_t frames_written = 0;
     bool crop_warned = false;
     bool warned_non_sdr = false;
 
@@ -354,7 +408,8 @@ int run_capture(const Options &opts,
 
             for (uint32_t y = 0; y < crop->h; ++y)
             {
-                const float *src = rgba32f.data() + ((crop->y + y) * out_w + crop->x) * 4u;
+                const float *src = rgba32f.data() +
+                                   (((crop->y + y) * out_w + crop->x) * static_cast<size_t>(4));
                 cropped.insert(cropped.end(), src, src + static_cast<size_t>(crop->w) * 4u);
             }
             rgba32f = std::move(cropped);
@@ -395,7 +450,7 @@ int run_capture(const Options &opts,
                           << colorspace_idx << " (not SDR enum 0). Falling back to RGBA64 path.\n";
             }
 
-            quantize_rgba_output(rgba32f, use_linear12_path, rgba16);
+            quantize_rgba_output(rgba32f, use_linear12_path, color.display_decode_gamma, rgba16);
 
             std::ostream &os = opts.write_to_stdout ? static_cast<std::ostream &>(std::cout)
                                                     : static_cast<std::ostream &>(out);
@@ -408,12 +463,19 @@ int run_capture(const Options &opts,
 
         last_written_w = frame_w;
         last_written_h = frame_h;
+        ++frames_written;
 
         std::this_thread::sleep_for(frame_delay);
     }
 
     const uint32_t final_w = last_written_w ? last_written_w : out_w;
     const uint32_t final_h = last_written_h ? last_written_h : out_h;
+
+    if (frames_written == 0)
+    {
+        std::cerr << "Capture produced no frames (no usable plane/framebuffer)\n";
+        return 1;
+    }
 
     if (!opts.pp_y4m)
     {

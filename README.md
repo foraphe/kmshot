@@ -52,7 +52,7 @@ avifenc -q 100 --stdin output_hdr.avif --depth 10 --yuv 444 --cicp 9/16/9 --clli
 ```
 Being a screenshot tool, the captured frame would likely not be a well behaved, singular HDR image and instead might contain a mix of SDR (e.g. UI) and HDR content. In this case, it's currently recommended to set the MaxCLL/MaxFALL values according to the monitor's capabilities, so that the screenshot would look similar to the source content, when viewed on a 10000-nit reference display (or displays that have better capabilities than the monitor used for capture). However, this needs further testing, and no testing has been done on setting the values other than the monitor's capabilities.
 
-Experimental 12bpc capture of linear RGB data into an 16bpc PNG (requires `ffmpeg`, and this WILL look wrong perceptually):
+Experimental 12bpc capture of linear RGB data into an 16bpc PNG (requires `ffmpeg`, and this WILL look wrong perceptually). The gamma used to linearize the values follows `--display-gamma` (default 2.2):
 ```bash
 sudo ./kms_capture --card /dev/dri/card0 --frames 1 --sdr-linear-12bpc --stdout | \
 ffmpeg -f rawvideo -video_size <width>x<height> -pix_fmt rgba64le -i - \
@@ -122,7 +122,7 @@ Capture
 
 Output format
   --pp-y4m                Write full-range 10-bit YUV444 (Y4M) instead of RGBA64
-  --sdr-linear-12bpc      Raw path only: decode gamma 2.2 and store 12-bit MSB-aligned
+  --sdr-linear-12bpc      Raw path only: decode --display-gamma and store 12-bit MSB-aligned
   --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)
 
 Colour handling

@@ -173,19 +173,22 @@ void log_hdr_metadata(int card_fd, uint32_t connector_id)
     std::cerr << "HDR_OUTPUT_METADATA: blob_id=" << *hdr_blob_id
               << " length=" << blob->length << "\n";
 
-    if (blob->length < sizeof(uint32_t) + sizeof(hdr_metadata_infoframe))
+    if (blob->length < sizeof(hdr_output_metadata))
     {
         std::cerr << "HDR_OUTPUT_METADATA: blob too small to parse\n";
         return;
     }
 
-    const auto *raw = reinterpret_cast<const hdr_output_metadata *>(blob->data);
-    const auto eotf = static_cast<uint8_t>(raw->hdmi_metadata_type1.eotf);
-    const auto metadata_type = static_cast<uint8_t>(raw->hdmi_metadata_type1.metadata_type);
-    const auto max_cll = static_cast<uint32_t>(raw->hdmi_metadata_type1.max_cll);
-    const auto max_fall = static_cast<uint32_t>(raw->hdmi_metadata_type1.max_fall);
-    const auto max_luma = static_cast<uint32_t>(raw->hdmi_metadata_type1.max_display_mastering_luminance);
-    const auto min_luma = static_cast<uint32_t>(raw->hdmi_metadata_type1.min_display_mastering_luminance);
+    // Copy instead of casting to avoid relying on libdrm's buffer alignment.
+    hdr_output_metadata metadata{};
+    std::memcpy(&metadata, blob->data, sizeof(metadata));
+
+    const auto eotf = static_cast<uint8_t>(metadata.hdmi_metadata_type1.eotf);
+    const auto metadata_type = static_cast<uint8_t>(metadata.hdmi_metadata_type1.metadata_type);
+    const auto max_cll = static_cast<uint32_t>(metadata.hdmi_metadata_type1.max_cll);
+    const auto max_fall = static_cast<uint32_t>(metadata.hdmi_metadata_type1.max_fall);
+    const auto max_luma = static_cast<uint32_t>(metadata.hdmi_metadata_type1.max_display_mastering_luminance);
+    const auto min_luma = static_cast<uint32_t>(metadata.hdmi_metadata_type1.min_display_mastering_luminance);
 
     std::cerr << "HDR metadata:"
               << " metadata_type=" << static_cast<uint32_t>(metadata_type)

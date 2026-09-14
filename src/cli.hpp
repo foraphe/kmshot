@@ -44,7 +44,6 @@ struct Options
     double display_gamma{2.2};                 // --display-gamma
     std::optional<std::array<double, 9>> color_matrix; // --color-matrix
     bool sdr_target_bt2020{true};              // --sdr-target bt709|bt2020
-    bool sdr_target_explicit{false};
     std::optional<int> colorspace_override;    // --colorspace N
     PqInput pq_input{PqInput::Auto};           // --pq-input
 

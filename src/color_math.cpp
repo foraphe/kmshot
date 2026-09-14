@@ -19,8 +19,6 @@ namespace kmshot
 namespace
 {
 
-constexpr double kD50x = 0.34567;
-constexpr double kD50y = 0.35850;
 constexpr double kD65x = 0.31270;
 constexpr double kD65y = 0.32900;
 

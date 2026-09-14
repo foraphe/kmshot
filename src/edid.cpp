@@ -188,7 +188,9 @@ void parse_cta_block(const uint8_t *block, EdidInfo &out)
         const uint8_t tag = static_cast<uint8_t>((header >> 5) & 0x07u);
         const size_t len = header & 0x1fu;
 
-        if (i + 1 + len > kBlockSize)
+        // Data blocks live in bytes 4..dtd_offset-1; anything that would spill
+        // past that is malformed and must not be reinterpreted as DTD bytes.
+        if (i + 1 + len > dtd_offset)
         {
             out.warnings.emplace_back("truncated CTA-861 data block");
             break;

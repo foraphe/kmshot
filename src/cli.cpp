@@ -3,6 +3,7 @@
 #include "color_math.hpp"
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -36,7 +37,8 @@ bool parse_double(const std::string &text, double &out)
     {
         size_t consumed = 0;
         const double v = std::stod(text, &consumed);
-        if (consumed != text.size())
+        // Reject inf/nan so downstream arithmetic stays well defined.
+        if (consumed != text.size() || !std::isfinite(v))
             return false;
         out = v;
         return true;
@@ -73,7 +75,7 @@ void print_usage(std::ostream &os, const char *argv0)
        << "\n"
        << "Output format\n"
        << "  --pp-y4m                Write full-range 10-bit YUV444 (Y4M) instead of RGBA64\n"
-       << "  --sdr-linear-12bpc      Raw path only: decode gamma 2.2 and store 12-bit MSB-aligned\n"
+       << "  --sdr-linear-12bpc      Raw path only: decode --display-gamma and store 12-bit MSB-aligned\n"
        << "  --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)\n"
        << "\n"
        << "Colour handling\n"
@@ -297,7 +299,6 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
                 error = "--sdr-target expects bt709 or bt2020";
                 return ParseStatus::Error;
             }
-            opts.sdr_target_explicit = true;
         }
         else if (a == "--colorspace")
         {
@@ -336,6 +337,12 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
     if (opts.pp_y4m && opts.sdr_linear_12bpc)
     {
         error = "--sdr-linear-12bpc is only for the raw RGBA output path (without --pp-y4m)";
+        return ParseStatus::Error;
+    }
+
+    if (opts.print_edid && !opts.use_edid)
+    {
+        error = "--print-edid cannot be combined with --no-edid";
         return ParseStatus::Error;
     }
 
