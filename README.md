@@ -184,6 +184,34 @@ Misc
 
 KDE Plasma blends to the monitor's native profile primaries when DRM reports Colorspace = 0 (Default), but uses (likely) a pure gamma 2.2 transfer function. It's hard to map these colors back into well defined color spaces since profiles might contain non-linear LUTs that are not easily invertible. The tool therefore derives the primaries from the monitor's EDID and computes a 3x3 matrix from the monitor's colour space to Rec.709/Rec.2020 with sRGB transfer (see `src/color_profile.cpp` and `src/color_math.cpp`). The EDID primaries describe the panel as shipped, not a calibrated measurement, so this is an approximation; use `--display-primaries` / `--display-white` with a measured profile if you have one, or `--color-matrix` with a matrix from a calibration tool. In testing with KDE Plasma set to "prefer color accuracy" (16bpc max) using grayscale and RGB ramps from 0 to 1023, up to 10% error was observed in the green channel on a calibrated NE160QDM-NM7 monitor panel, in "prefer efficiency" accuracy is better but still not pixel-perfect. In HDR mode, where KDE agreed on using BT.2020 and PQ, color accuracy is better since the colorspace is much more well defined, and less transformation needs to be done on the pixel values.
 
+### Convert AVIF to JPEG
+`avif_to_jpeg.py` converts an HDR AVIF into an [Ultra HDR](https://en.wikipedia.org/wiki/Ultra_HDR) JPEG (a JPEG base image plus a gain map), which Android and other compatible viewers render as HDR while JPEG readers not supporting Ultra HDR still shows the SDR base image.
+
+Dependencies:
+
+- `numpy`, `pillow` and `pillow-heif` (`pip install numpy pillow pillow-heif`). Without `pillow-heif` the HDR frame is decoded through Pillow at 8 bits, which costs shadow detail.
+- `ffmpeg` built with `zscale` (libzimg).
+- A Display P3 ICC profile (e.g. `/usr/share/color/icc/colord/Display P3.icc` from the `colord` or `icc-profiles-free` package, or any path passed to `--icc`). Without one the base image would be Display P3 data with no profile, which readers interpret as sRGB and render oversaturated.
+
+```bash
+python3 avif_to_jpeg.py -o output.jpg input.avif
+```
+
+The input has to be BT.2020 + PQ (what `kms_capture --avif-out` writes). The script reads the CICP metadata of the AVIF and refuses anything else unless `--assume-pq` is passed. What it does:
+
+1. `ffmpeg` tone maps the HDR frame to Display P3 with the sRGB transfer function (`--tonemap`, default `mobius`; `--sdr-white`, default 203 nits = BT.2408 diffuse white).
+2. The original AVIF is decoded back to PQ code values and converted to linear P3 nits, keeping 10/12-bit depth when `pillow-heif` is available.
+3. `log2(HDR/SDR)` is evaluated per pixel on the P3 luminance and stored as an 8-bit gain map. The ratio is computed with the same `(value + Offset)` form the decoder applies, and against the decoded base JPEG rather than the pre-compression image, so the reconstruction stays correct in the deep shadows and matches what a decoder actually sees.
+4. The `hdrgm` XMP is written into both the primary image and the gain map image (readers differ in which one they parse), plus an MPF segment pointing at the gain map.
+
+Notes and limitations:
+
+- The gain map is single channel, so one recovery value is applied to R, G and B. Heavily saturated highlights can drift slightly in chroma; in exchange the map works with every decoder.
+- The gain map range is `[p0.01, max]` of the log2 ratio by default (`--gm-trim-low` / `--gm-trim-high`), i.e. the brightest highlights are kept instead of being clipped to a percentile.
+- `HDRCapacityMin` is 0, so an SDR display shows the base image untouched; only displays with HDR headroom apply the map.
+- The base image is encoded at quality 95 with 4:4:4 chroma by default (better for text and UI edges than the 4:2:0 default; `--sdr-subsampling` changes it). A 2560x1600 screenshot lands at roughly 1.8 MB: ~1.3 MB base + ~480 KB gain map.
+- The script hasn't been very thoroughly tested yet, and in the future this feature may be integrated into the main program. If `libultrahdr` happens to be installed, its reference tool can inspect the result on Linux: `ultrahdr_app -m 1 -j output.jpg -P` prints the gain map metadata, and `ultrahdr_app -m 1 -j output.jpg -o 2 -O 5 -z out.raw` decodes it back to PQ.
+
 ### Examples and sanity checks
 Example of a synthetic luminance block pattern, its screenshot on a 1261-nit monitor, and the screenshot histogram:
 |Synthetic pattern|Monitor screenshot|
