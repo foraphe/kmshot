@@ -46,7 +46,6 @@ struct AvifWriter::Impl
     std::string path;
     uint32_t width{0};
     uint32_t height{0};
-    bool sequence{false};
     bool added{false};
     std::vector<uint16_t> rgb;
     uint32_t rgb_depth{kDepth};
@@ -75,8 +74,6 @@ bool AvifWriter::open(const std::string &path,
                       uint32_t height,
                       const AvifSettings &settings,
                       const ColorTransformConfig &color,
-                      bool sequence,
-                      uint32_t timescale,
                       std::string &error)
 {
     if (width == 0 || height == 0)
@@ -97,7 +94,6 @@ bool AvifWriter::open(const std::string &path,
     impl->path = path;
     impl->width = width;
     impl->height = height;
-    impl->sequence = sequence;
     impl->rgb.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u);
 
     impl->image = avifImageCreate(width, height, kDepth, format);
@@ -148,8 +144,6 @@ bool AvifWriter::open(const std::string &path,
     impl->encoder->quality = kQuality;
     impl->encoder->qualityAlpha = kQuality;
     impl->encoder->speed = kSpeed;
-    if (sequence)
-        impl->encoder->timescale = timescale ? timescale : 1;
 
     impl_ = std::move(impl);
     return true;
@@ -180,9 +174,7 @@ bool AvifWriter::submit(std::string &error)
         return false;
     }
 
-    const avifAddImageFlags flags =
-        impl_->sequence ? AVIF_ADD_IMAGE_FLAG_NONE : AVIF_ADD_IMAGE_FLAG_SINGLE;
-    res = avifEncoderAddImage(impl_->encoder, impl_->image, 1, flags);
+    res = avifEncoderAddImage(impl_->encoder, impl_->image, 1, AVIF_ADD_IMAGE_FLAG_SINGLE);
     if (res != AVIF_RESULT_OK)
     {
         error = std::string("avifEncoderAddImage: ") + avifResultToString(res);

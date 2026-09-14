@@ -15,10 +15,13 @@ bool write_y4m_header(
     int fps_num,
     int fps_den);
 
+// `samples` is the number of 16-bit samples to write per plane, which may be
+// smaller than the vectors (a pooled buffer can be cropped in place).
 bool write_y4m_frame(
     std::ostream &os,
     const std::vector<uint16_t> &y,
     const std::vector<uint16_t> &u,
-    const std::vector<uint16_t> &v);
+    const std::vector<uint16_t> &v,
+    size_t samples);
 
 } // namespace kmshot

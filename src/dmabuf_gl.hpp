@@ -35,6 +35,11 @@ public:
     // expected to fall back to the CPU transform.
     bool supports_gpu_color() const { return color_program_.valid() && high_precision_path_; }
 
+    // True when the colour shader can write the three YUV planes into separate
+    // 16-bit targets (MRT), which removes the CPU de-interleave entirely. Only
+    // set when the driver actually passed the runtime readback probe in init().
+    bool supports_planar_yuv() const { return planar_program_.valid() && planar_readback_ok_; }
+
     bool read_dmabuf_to_rgba32f(
         int dmabuf_fd,
         uint32_t fb_width,
@@ -148,12 +153,67 @@ private:
 
     void set_color_uniforms(const ColorTransformConfig &color, bool output_rgb);
 
+    // ES3 variant of the colour pass that writes Y, U and V into three separate
+    // R16 targets instead of one packed RGBA target.
+    struct PlanarProgram : Program
+    {
+        GLint display_to_target{-1};
+        GLint rgb_to_yuv{-1};
+        GLint decode_gamma{-1};
+        GLint pq_scale{-1};
+        GLint mode{-1};
+
+        bool valid() const
+        {
+            return Program::valid() && display_to_target >= 0 && rgb_to_yuv >= 0 &&
+                   decode_gamma >= 0 && pq_scale >= 0 && mode >= 0;
+        }
+    };
+
+    // Shared DMA-BUF import / full-screen draw / teardown.
+    bool begin_image(int dmabuf_fd,
+                     uint32_t fb_width,
+                     uint32_t fb_height,
+                     uint32_t fourcc,
+                     uint32_t pitch0,
+                     uint32_t offset0,
+                     uint64_t modifier,
+                     bool dmabuf_sync);
+    void end_image(int dmabuf_fd, bool dmabuf_sync);
+    void draw_quad(const Program &program,
+                   float uv_off_x,
+                   float uv_off_y,
+                   float uv_scale_x,
+                   float uv_scale_y);
+
+    bool build_planar_program();
+    bool ensure_plane_targets(uint32_t w, uint32_t h);
+    bool verify_planar_readback();
+    bool render_planar(int dmabuf_fd,
+                       uint32_t fb_width,
+                       uint32_t fb_height,
+                       uint32_t out_width,
+                       uint32_t out_height,
+                       float uv_off_x,
+                       float uv_off_y,
+                       float uv_scale_x,
+                       float uv_scale_y,
+                       uint32_t fourcc,
+                       uint32_t pitch0,
+                       uint32_t offset0,
+                       uint64_t modifier,
+                       bool dmabuf_sync,
+                       std::vector<uint16_t> &y,
+                       std::vector<uint16_t> &u,
+                       std::vector<uint16_t> &v);
+
+    void attach_readback_target();
     bool framebuffer_complete();
     bool verify_fp32_readback();
     bool ensure_readback_target(uint32_t w, uint32_t h, bool prefer_u16);
     bool readback_to_float(const std::vector<uint8_t> &raw, std::vector<float> &out) const;
     GLuint compile_shader(GLenum type, const char *src);
-    bool link_program(Program &program, const char *fragment_shader);
+    bool link_program(Program &program, const char *vertex_shader, const char *fragment_shader);
     bool build_blit_program();
     bool build_color_program();
     bool gl_has_error(const char *stage);
@@ -193,18 +253,28 @@ private:
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_{nullptr};
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_{nullptr};
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_{nullptr};
+    EGLImageKHR image_{EGL_NO_IMAGE_KHR};
 
     GLuint import_tex_{0};
     GLuint readback_tex_{0};
     GLuint fbo_{0};
     Program blit_program_;
     ColorProgram color_program_;
+    PlanarProgram planar_program_;
+    GLuint plane_tex_[3]{0, 0, 0};
+    uint32_t plane_w_{0};
+    uint32_t plane_h_{0};
+    bool planar_readback_ok_{false};
     GLuint vbo_{0};
 
     bool sync_warned_{false};
     bool context_lost_{false};
     uint32_t rb_w_{0};
     uint32_t rb_h_{0};
+
+    // Reused between frames: allocating (and zero-filling) a fresh 25-50 MB
+    // buffer every frame showed up as ~25% of the capture CPU time.
+    std::vector<uint8_t> readback_bytes_;
 };
 
 } // namespace kmshot

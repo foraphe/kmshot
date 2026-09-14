@@ -33,8 +33,10 @@ struct AvifSettings
     std::optional<std::pair<uint16_t, uint16_t>> clli;
 };
 
-// Encodes captured RGBA float frames to AVIF with libavif. A single frame
-// produces a still image, several frames produce an image sequence.
+// Encodes one captured frame to AVIF with libavif. AVIF output is always a
+// still image: image sequences written by libavif 1.4 crash in
+// avifEncoderFinish when content light level metadata is present, and a single
+// screenshot is what this tool is for.
 class AvifWriter
 {
 public:
@@ -43,15 +45,11 @@ public:
     AvifWriter(const AvifWriter &) = delete;
     AvifWriter &operator=(const AvifWriter &) = delete;
 
-    // `timescale` is the sequence frame rate in Hz and is only used when
-    // `sequence` is true.
     bool open(const std::string &path,
               uint32_t width,
               uint32_t height,
               const AvifSettings &settings,
               const ColorTransformConfig &color,
-              bool sequence,
-              uint32_t timescale,
               std::string &error);
 
     bool is_open() const;

@@ -28,16 +28,17 @@ bool write_y4m_frame(
     std::ostream &os,
     const std::vector<uint16_t> &y,
     const std::vector<uint16_t> &u,
-    const std::vector<uint16_t> &v)
+    const std::vector<uint16_t> &v,
+    size_t samples)
 {
-    if (y.size() != u.size() || y.size() != v.size())
+    if (samples == 0 || y.size() < samples || u.size() < samples || v.size() < samples)
         return false;
 
     static constexpr char kFrame[] = "FRAME\n";
     os.write(kFrame, sizeof(kFrame) - 1);
-    os.write(reinterpret_cast<const char *>(y.data()), static_cast<std::streamsize>(y.size() * sizeof(uint16_t)));
-    os.write(reinterpret_cast<const char *>(u.data()), static_cast<std::streamsize>(u.size() * sizeof(uint16_t)));
-    os.write(reinterpret_cast<const char *>(v.data()), static_cast<std::streamsize>(v.size() * sizeof(uint16_t)));
+    os.write(reinterpret_cast<const char *>(y.data()), static_cast<std::streamsize>(samples * sizeof(uint16_t)));
+    os.write(reinterpret_cast<const char *>(u.data()), static_cast<std::streamsize>(samples * sizeof(uint16_t)));
+    os.write(reinterpret_cast<const char *>(v.data()), static_cast<std::streamsize>(samples * sizeof(uint16_t)));
     return static_cast<bool>(os);
 }
 

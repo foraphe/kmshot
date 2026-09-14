@@ -1,6 +1,6 @@
-// Encodes frames with the in-process libavif writer and decodes the result back
-// to verify the CICP metadata, chroma subsampling, content light level and the
-// still-vs-sequence choice.
+// Encodes a frame with the in-process libavif writer and decodes the result
+// back to verify the CICP metadata, chroma subsampling, content light level and
+// the pixel round-trip.
 #include "color_transform.hpp"
 #include "encoder.hpp"
 
@@ -149,47 +149,20 @@ DecodedInfo decode_still(const std::string &path)
     return info;
 }
 
-int count_frames(const std::string &path)
-{
-    avifDecoder *decoder = avifDecoderCreate();
-    if (!decoder)
-        return -1;
-
-    int frames = -1;
-    if (avifDecoderSetIOFile(decoder, path.c_str()) == AVIF_RESULT_OK &&
-        avifDecoderParse(decoder) == AVIF_RESULT_OK)
-    {
-        frames = 0;
-        while (avifDecoderNextImage(decoder) == AVIF_RESULT_OK)
-            ++frames;
-    }
-
-    avifDecoderDestroy(decoder);
-    return frames;
-}
-
 std::string encode(const std::string &path,
                    const ColorTransformConfig &color,
                    const AvifSettings &settings,
                    const std::vector<float> &rgba,
                    uint32_t width,
-                   uint32_t height,
-                   bool sequence,
-                   int frame_count)
+                   uint32_t height)
 {
     std::string error;
     AvifWriter writer;
-    if (!writer.open(path, width, height, settings, color, sequence,
-                     static_cast<uint32_t>(30), error))
-    {
+    if (!writer.open(path, width, height, settings, color, error))
         return error;
-    }
 
-    for (int i = 0; i < frame_count; ++i)
-    {
-        if (!writer.add_frame(rgba.data(), color, error))
-            return error;
-    }
+    if (!writer.add_frame(rgba.data(), color, error))
+        return error;
 
     if (!writer.finish(error))
         return error;
@@ -213,7 +186,7 @@ int main()
         settings.clli = std::make_pair(static_cast<uint16_t>(1000), static_cast<uint16_t>(400));
 
         const std::string err = encode(path, make_config(false, true), settings,
-                                       gradient, width, height, false, 1);
+                                       gradient, width, height);
         check(err.empty(), "encoding succeeded" + (err.empty() ? "" : ": " + err));
 
         const DecodedInfo info = decode_still(path);
@@ -243,7 +216,7 @@ int main()
         settings.subsampling = "420";
 
         const std::string err = encode(path, make_config(false, false), settings,
-                                       gradient, width, height, false, 1);
+                                       gradient, width, height);
         check(err.empty(), "encoding succeeded" + (err.empty() ? "" : ": " + err));
 
         const DecodedInfo info = decode_still(path);
@@ -269,7 +242,7 @@ int main()
         settings.clli = std::make_pair(static_cast<uint16_t>(1261), static_cast<uint16_t>(604));
 
         const std::string err = encode(path, make_config(true, true), settings,
-                                       gradient, width, height, false, 1);
+                                       gradient, width, height);
         check(err.empty(), "encoding succeeded" + (err.empty() ? "" : ": " + err));
 
         const DecodedInfo info = decode_still(path);
@@ -278,25 +251,6 @@ int main()
         check_eq(info.transfer, AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084, "CICP transfer PQ");
         check_eq(info.max_cll, 1261, "MaxCLL");
         check_eq(info.max_pall, 604, "MaxPALL");
-
-        std::remove(path.c_str());
-    }
-
-    // --- Image sequence.
-    {
-        std::cout << "Three-frame sequence:\n";
-        const std::string path = "kmshot_avif_test_seq.avif";
-        AvifSettings settings;
-        settings.subsampling = "420";
-
-        const std::string err = encode(path, make_config(false, true), settings,
-                                       gradient, width, height, true, 3);
-        check(err.empty(), "encoding succeeded" + (err.empty() ? "" : ": " + err));
-        check_eq(count_frames(path), 3, "decoded frame count");
-
-        std::string brand;
-        check(file_starts_with_ftyp(path, brand) && brand == "avis",
-              "ISOBMFF ftyp brand is avis");
 
         std::remove(path.c_str());
     }
@@ -319,7 +273,7 @@ int main()
         for (size_t i = 3; i < solid.size(); i += 4u)
             solid[i] = 1.0f;
 
-        const std::string err = encode(path, cfg, settings, solid, width, height, false, 1);
+        const std::string err = encode(path, cfg, settings, solid, width, height);
         check(err.empty(), "encoding succeeded" + (err.empty() ? "" : ": " + err));
 
         avifDecoder *decoder = avifDecoderCreate();
@@ -369,7 +323,7 @@ int main()
 
         std::string error;
         AvifWriter writer;
-        const bool opened = writer.open(path, width, height, settings, cfg, false, 30, error);
+        const bool opened = writer.open(path, width, height, settings, cfg, error);
         check(opened, "encoder opens" + (opened ? "" : ": " + error));
 
         std::vector<uint16_t> rgb16(static_cast<size_t>(width) * height * 3u, 32768);

@@ -103,7 +103,7 @@ void print_usage(std::ostream &os, const char *argv0)
        << "  --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)\n"
        << "\n"
        << "AVIF output\n"
-       << "  --avif-out PATH         Encode to a single AVIF file instead of raw RGBA/Y4M\n"
+       << "  --avif-out PATH         Encode one still frame to an AVIF file instead of raw RGBA/Y4M\n"
        << "  --avif-yuv 444|422|420  Chroma subsampling; libavif does the downsampling (default 444)\n"
        << "  --avif-cicp P/T/M       Override the CICP primaries/transfer/matrix metadata\n"
        << "  --avif-clli MAXCLL,MAXFALL\n"
@@ -447,6 +447,18 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
     {
         error = "--avif-yuv/--avif-cicp/--avif-clli require --avif-out";
         return ParseStatus::Error;
+    }
+
+    if (avif_mode && opts.frames != 1)
+    {
+        // AVIF output is a single still image. Multi-frame encoding is not
+        // supported: libavif crashes in avifEncoderFinish when an image
+        // sequence carries content light level metadata, which HDR captures
+        // always set. Clamp instead of failing so the common
+        // "--avif-out shot.avif" invocation works with the default --frames.
+        std::cerr << "note: --avif-out always writes a single frame (ignoring --frames "
+                  << opts.frames << ")\n";
+        opts.frames = 1;
     }
 
     if (opts.pp_y4m && opts.sdr_linear_12bpc)

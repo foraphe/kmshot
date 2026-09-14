@@ -23,13 +23,13 @@ The checks cover the EDID decoder (against a real panel, cross-checked with `edi
 | `src/cli.*` | Option parsing and `--help` |
 | `src/drm_util.*` | DRM property/plane/framebuffer helpers, EDID blob read |
 | `src/drm_debug.*` | Diagnostic dumps of connector/HDR/colorspace state |
-| `src/dmabuf_gl.*` | DMA-BUF import into EGL/GLES, GPU colour transform and readback |
+| `src/dmabuf_gl.*` | DMA-BUF import into EGL/GLES, GPU colour transform, planar/interleaved readback |
 | `src/capture.*` | Capture loop, slurp crop geometry, raw RGBA output |
 | `src/color_math.*` | 3x3 matrix math, gamut presets, LittleCMS2 matrix extraction |
 | `src/color_profile.*` | Resolves display primaries + target space into a transform |
 | `src/color_transform.*` | RGBA -> YUV444P16 conversion and PQ helpers |
 | `src/edid.*` | EDID base block + CTA-861 extension parser |
-| `src/encoder.*` | AVIF encoding via libavif (still images and sequences) |
+| `src/encoder.*` | AVIF encoding via libavif (single still image) |
 | `src/y4m.*` | YUV4MPEG2 container writer |
 | `tests/`, `tools/` | Self-checks |
 
@@ -71,7 +71,7 @@ ffmpeg -f rawvideo -video_size <width>x<height> -pix_fmt rgba64le -i - \
 - **Colour metadata (CICP):** derived from the colour pipeline. The `nclx` (`colr`) box records the target primaries and matrix (BT.2020 for HDR captures, otherwise whatever `--sdr-target` selected), the transfer function (PQ for HDR, sRGB otherwise) and full range. `--avif-cicp P/T/M` overrides all three if a specific consumer needs something else.
 - **Content light level:** for HDR captures MaxCLL/MaxPALL default to the monitor's EDID values; `--avif-clli MAXCLL,MAXFALL` overrides them. SDR captures get no `clli` box.
 
-A single frame (`--frames 1`) produces a still AVIF (`ftyp` brand `avif`); several frames produce an image sequence (`ftyp` brand `avis`) paced at `--fps`. `--avif-out` is mutually exclusive with `--stdout`, `--pp-y4m` and `--sdr-linear-12bpc`.
+AVIF output is always a single still image (`ftyp` brand `avif`): `--avif-out` forces `--frames 1` and says so if a different count was requested. (libavif 1.4 crashes in `avifEncoderFinish` when an image sequence carries content light level metadata, which every HDR capture sets, so sequences are not offered.) `--avif-out` is mutually exclusive with `--stdout`, `--pp-y4m` and `--sdr-linear-12bpc`.
 
 ### Colour handling
 For SDR captures (DRM connector `Colorspace = 0`) the compositor blends in the display's native primaries, so the tool has to convert those values into a well defined colour space before writing them out. Instead of carrying a hardcoded matrix, the display primaries and white point are now read from the monitor's EDID and the conversion matrix is computed by LittleCMS 2 (relative colorimetric intent, i.e. Bradford chromatic adaptation between the two white points).
@@ -81,12 +81,14 @@ For Y4M and AVIF output the colour management runs in a fragment shader while th
 
 The GPU path needs a GLES3 context with `GL_EXT_color_buffer_float` (the same requirement as the FP32 readback path); the colour shader is only built when that is available. If it is missing, if the shader fails to build, or if a frame fails at runtime, the capture automatically falls back to the CPU transform and says so on stderr; `--cpu-color` forces the CPU path. The CPU fallback evaluates the transfer functions through sqrt-indexed lookup tables (within one 16-bit LSB of the exact formulas). Raw RGBA output uses the CPU path, because it needs the untouched framebuffer values.
 
-The colour pass renders into a 16-bit unorm target and is read back with `glReadPixels(GL_UNSIGNED_SHORT)`, so the samples arrive already quantized: the CPU only de-interleaves them (~3 ms at 2560×1600, versus ~17 ms for a float readback and ~91 ms for the full CPU transform). If the driver cannot render to `RGBA16` the FP32 target is used instead — Y4M then keeps working through the CPU quantization, and AVIF falls back to the float RGB path.
+For Y4M the shader does not stop at an interleaved target: the fragment shader writes Y, U and V into three separate `R16` colour attachments (multi-render-target) and each plane is read back on its own with `glReadPixels(GL_RED, GL_UNSIGNED_SHORT)`. The samples arrive quantized *and* already planar, so no CPU-side de-interleave is needed at all. Before this, the pass rendered into one 16-bit unorm target and the CPU split the planes out of it — that split was the single hottest function left in the capture loop (~3 ms per 2560×1600 frame, versus ~17 ms for a float readback and ~91 ms for the full CPU transform).
+
+Multi-render-target `R16` support is probed at runtime rather than assumed: at startup the reader renders known values into three `R16` targets, reads them back and compares, and logs `Planar YUV writeback: available|unavailable`. When it is unavailable — or when a frame fails in the planar path — the capture falls back to the interleaved `RGBA16` target (and, if the driver cannot render to `RGBA16` either, to the FP32 target; AVIF then uses the float RGB path). `KMSHOT_NO_PLANAR=1` disables the planar path explicitly, which is useful when A/B testing a driver.
 
 #### Frame pacing and output threads
 Frames are paced against an absolute deadline (`sleep_until(start + i / fps)`) rather than sleeping a full interval after each frame's work. The old scheme made the effective rate `1 / (work + interval)` and added the whole interval to the capture latency even when the work was fast.
 
-Y4M output is written by a separate thread through a small bounded queue (2 frames), so a slow consumer — an encoder reading the pipe — cannot stall the capture loop; only a sustained backlog does. Raw and AVIF output are still written inline.
+Y4M output is written by a separate thread, so a slow consumer — an encoder reading the pipe — cannot stall the capture loop; only a sustained backlog does. The writer owns a small pool of YUV buffer sets (3) that it hands to the capture loop and takes back after writing, and it takes an explicit sample count so a cropped frame can stay in a full-size buffer. This matters more than it sounds: profiling the capture loop showed that allocating and zero-filling those ~25 MB buffers once per frame, plus the `std::vector`-based de-interleave, was about half of the total CPU time. Reusing them and removing the de-interleave entirely (the planar writeback above) took the 2560×1600 capture rate from 34 fps to ~110 fps and then to ~320 fps, i.e. about 3 ms per frame with the capture loop using well under one core. Raw and AVIF output are still written inline.
 
 The display profile is resolved in this order:
 
@@ -150,7 +152,7 @@ Output format
   --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)
 
 AVIF output (in-process libavif, highest quality)
-  --avif-out PATH         Encode to a single AVIF file instead of raw RGBA/Y4M
+  --avif-out PATH         Encode one still frame to an AVIF file instead of raw RGBA/Y4M
   --avif-yuv 444|422|420  Chroma subsampling; libavif does the downsampling (default 444)
   --avif-cicp P/T/M       Override the CICP primaries/transfer/matrix metadata
   --avif-clli MAXCLL,MAXFALL
@@ -200,7 +202,7 @@ To verify if the tool works properly on a given system, it's possible to take a 
 ###### (and also personal thoughts and rants)
 - This tool is written with extensive use of LLMs, so expect some weird code here and there.
 - It seems either I'm making mistakes, or that Gwenview is not very well color managed at this point. I'm treating the display results on Chromium as HDR ground truths since it seems to be  more accurate (though it also introduces its own color shifts in SDR).
-- VRAM framebuffers are usually not directly in a decodable format, and this tool used DMA-BUF to map the images into a GL context and read the pixels back. The implementation is not very optimized and can incur significant CPU overhead compared to the Sunshine kmsgrab implementation.
+- VRAM framebuffers are usually not directly in a decodable format, and this tool used DMA-BUF to map the images into a GL context and read the pixels back. The colour conversion now runs in a fragment shader and the readback is planar 16-bit, so the remaining CPU cost is little more than the `glReadPixels` transfer itself; the frame content still has to leave the GPU, which is the main difference from a zero-copy encoder feed such as Sunshine's kmsgrab.
 - I have little knowledge about color science,  if you see any mistakes or have suggestions on improving the project, please let me know!
 - However, this is a project coming out of a sudden burst of curiosity, and it might not be maintained in the long run (also see my other abandoned projects). Hopefully, soon we will have proper protocols and APIs for such functionalities in Wayland.
-- Technically, this tool is built with support for streaming frames in mind. With Y4M output the colour transform runs on the GPU, the readback is 16-bit and the writer is on its own thread, which is enough for real-time capture at typical desktop resolutions — but the frame the compositor is scanning out is not synchronised with a page flip, so a capture can still tear or repeat a frame. The tool also doesn't support capturing from multiple planes, so OSDs and cursors that are rendered on separate planes won't be captured.
+- Technically, this tool is built with support for streaming frames in mind. With Y4M output the colour transform runs on the GPU, the readback is 16-bit and already planar, and the writer is on its own thread, which is enough for real-time capture at typical desktop resolutions (~320 fps at 2560×1600 into `/dev/null` on the test machine) — but the frame the compositor is scanning out is not synchronised with a page flip, so a capture can still tear or repeat a frame. The tool also doesn't support capturing from multiple planes, so OSDs and cursors that are rendered on separate planes won't be captured.
