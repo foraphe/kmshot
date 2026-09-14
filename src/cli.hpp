@@ -23,6 +23,7 @@ struct Options
 {
     std::string card_path{"/dev/dri/card0"};
     std::string out_path{"frames.rgba64le"};
+    bool out_explicit{false}; // --out was given
     int frames{120};
     int fps{30};
     int monitor{0};
@@ -52,6 +53,7 @@ struct Options
     bool sdr_target_bt2020{true};              // --sdr-target bt709|bt2020
     std::optional<int> colorspace_override;    // --colorspace N
     PqInput pq_input{PqInput::Auto};           // --pq-input
+    bool force_cpu_color{false};               // --cpu-color
 
     bool show_help{false};
     bool list_gamuts{false};

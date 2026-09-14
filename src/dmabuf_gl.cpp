@@ -50,6 +50,14 @@ bool has_extension(const char *ext_list, const char *ext)
     return (std::string(" ") + all + " ").find(needle) != std::string::npos;
 }
 
+// GLSL mat3 is column-major while Mat3 is row-major.
+void mat3_to_column_major(const Mat3 &m, GLfloat out[9])
+{
+    for (int col = 0; col < 3; ++col)
+        for (int row = 0; row < 3; ++row)
+            out[col * 3 + row] = static_cast<GLfloat>(m.m[row][col]);
+}
+
 } // namespace
 
 #ifndef GL_TEXTURE_EXTERNAL_OES
@@ -60,6 +68,9 @@ bool has_extension(const char *ext_list, const char *ext)
 #endif
 #ifndef GL_RGBA32F
 #define GL_RGBA32F 0x8814
+#endif
+#ifndef GL_RGBA16
+#define GL_RGBA16 0x805B
 #endif
 
 DmabufGlReader::~DmabufGlReader()
@@ -205,10 +216,8 @@ bool DmabufGlReader::init(int card_fd)
     const bool has_float_color = has_extension(gl_exts, "GL_EXT_color_buffer_float");
 
     high_precision_path_ = (gles_major_ >= 3) && has_float_color;
-    std::cerr << "Readback path: "
-              << (high_precision_path_ ? "GPU FP32 (RGBA32F -> float)"
-                                       : "fallback (RGBA8 -> software float)")
-              << "\n";
+    std::cerr << "GLES " << gles_major_ << ": FP32 colour buffers "
+              << (high_precision_path_ ? "available" : "unavailable") << "\n";
 
     eglCreateImageKHR_ = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
     eglDestroyImageKHR_ = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
@@ -243,6 +252,12 @@ bool DmabufGlReader::init(int card_fd)
         return false;
     }
 
+    // Best effort: without it the capture falls back to the CPU transform.
+    if (high_precision_path_ && build_color_program())
+        std::cerr << "Colour transform: GPU (fragment shader)\n";
+    else
+        std::cerr << "Colour transform: CPU (GPU pipeline unavailable)\n";
+
     const GLfloat quad[] = {
         -1.f, -1.f, 0.f, 0.f,
         1.f, -1.f, 1.f, 0.f,
@@ -256,7 +271,7 @@ bool DmabufGlReader::init(int card_fd)
     return true;
 }
 
-bool DmabufGlReader::read_dmabuf_to_rgba32f(
+bool DmabufGlReader::render_and_readback(
     int dmabuf_fd,
     uint32_t fb_width,
     uint32_t fb_height,
@@ -271,7 +286,9 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
     uint32_t offset0,
     uint64_t modifier,
     bool dmabuf_sync,
-    std::vector<float> &out_rgba32f)
+    const Program &program,
+    bool prefer_u16,
+    std::vector<uint8_t> &out_bytes)
 {
     auto dmabuf_sync_ioctl = [&](uint64_t flags)
     {
@@ -323,7 +340,7 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
         return false;
     }
 
-    if (!ensure_readback_target(out_width, out_height))
+    if (!ensure_readback_target(out_width, out_height, prefer_u16))
     {
         eglDestroyImageKHR_(egl_dpy_, image);
         dmabuf_sync_ioctl(DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
@@ -350,20 +367,20 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
     }
 
     glViewport(0, 0, static_cast<GLsizei>(out_width), static_cast<GLsizei>(out_height));
-    glUseProgram(prog_);
+    glUseProgram(program.id);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glEnableVertexAttribArray(static_cast<GLuint>(loc_pos_));
-    glEnableVertexAttribArray(static_cast<GLuint>(loc_uv_));
-    glVertexAttribPointer(static_cast<GLuint>(loc_pos_), 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<void *>(0));
-    glVertexAttribPointer(static_cast<GLuint>(loc_uv_), 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<void *>(2 * sizeof(GLfloat)));
-    glUniform2f(loc_uv_off_, uv_off_x, uv_off_y);
-    glUniform2f(loc_uv_scale_, uv_scale_x, uv_scale_y);
+    glEnableVertexAttribArray(static_cast<GLuint>(program.pos));
+    glEnableVertexAttribArray(static_cast<GLuint>(program.uv));
+    glVertexAttribPointer(static_cast<GLuint>(program.pos), 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<void *>(0));
+    glVertexAttribPointer(static_cast<GLuint>(program.uv), 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<void *>(2 * sizeof(GLfloat)));
+    glUniform2f(program.uv_off, uv_off_x, uv_off_y);
+    glUniform2f(program.uv_scale, uv_scale_x, uv_scale_y);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, import_tex_);
-    glUniform1i(loc_tex_, 0);
+    glUniform1i(program.tex, 0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glDisableVertexAttribArray(static_cast<GLuint>(loc_pos_));
-    glDisableVertexAttribArray(static_cast<GLuint>(loc_uv_));
+    glDisableVertexAttribArray(static_cast<GLuint>(program.pos));
+    glDisableVertexAttribArray(static_cast<GLuint>(program.uv));
 
     if (gl_has_error("glDrawArrays"))
     {
@@ -373,10 +390,30 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
     }
 
     const size_t px_count = static_cast<size_t>(out_width) * out_height;
-    out_rgba32f.resize(px_count * 4u);
 
-    if (high_precision_path_)
+    if (readback_format_ == ReadbackFormat::Rgba16Unorm)
     {
+        out_bytes.resize(px_count * 4u * sizeof(uint16_t));
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(
+            0, 0,
+            static_cast<GLsizei>(out_width),
+            static_cast<GLsizei>(out_height),
+            GL_RGBA,
+            GL_UNSIGNED_SHORT,
+            out_bytes.data());
+        glFinish();
+
+        if (gl_has_error("glReadPixels(GL_UNSIGNED_SHORT)/glFinish"))
+        {
+            eglDestroyImageKHR_(egl_dpy_, image);
+            dmabuf_sync_ioctl(DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+            return false;
+        }
+    }
+    else if (readback_format_ == ReadbackFormat::Rgba32f)
+    {
+        out_bytes.resize(px_count * 4u * sizeof(float));
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(
             0, 0,
@@ -384,7 +421,7 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
             static_cast<GLsizei>(out_height),
             GL_RGBA,
             GL_FLOAT,
-            out_rgba32f.data());
+            out_bytes.data());
         glFinish();
 
         if (gl_has_error("glReadPixels(GL_FLOAT)/glFinish"))
@@ -396,7 +433,7 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
     }
     else
     {
-        std::vector<uint8_t> tmp8(px_count * 4u);
+        out_bytes.resize(px_count * 4u);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(
             0, 0,
@@ -404,7 +441,7 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
             static_cast<GLsizei>(out_height),
             GL_RGBA,
             GL_UNSIGNED_BYTE,
-            tmp8.data());
+            out_bytes.data());
         glFinish();
 
         if (gl_has_error("glReadPixels(GL_UNSIGNED_BYTE)/glFinish"))
@@ -413,11 +450,6 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
             dmabuf_sync_ioctl(DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
             return false;
         }
-
-        for (size_t i = 0; i < tmp8.size(); ++i)
-        {
-            out_rgba32f[i] = static_cast<float>(tmp8[i]) * (1.0f / 255.0f);
-        }
     }
 
     eglDestroyImageKHR_(egl_dpy_, image);
@@ -425,12 +457,249 @@ bool DmabufGlReader::read_dmabuf_to_rgba32f(
     return true;
 }
 
-bool DmabufGlReader::ensure_readback_target(uint32_t w, uint32_t h)
+bool DmabufGlReader::read_dmabuf_to_rgba32f(
+    int dmabuf_fd,
+    uint32_t fb_width,
+    uint32_t fb_height,
+    uint32_t out_width,
+    uint32_t out_height,
+    float uv_off_x,
+    float uv_off_y,
+    float uv_scale_x,
+    float uv_scale_y,
+    uint32_t fourcc,
+    uint32_t pitch0,
+    uint32_t offset0,
+    uint64_t modifier,
+    bool dmabuf_sync,
+    std::vector<float> &out_rgba32f)
 {
-    if (rb_w_ == w && rb_h_ == h)
+    std::vector<uint8_t> raw;
+    if (!render_and_readback(
+            dmabuf_fd, fb_width, fb_height, out_width, out_height,
+            uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
+            fourcc, pitch0, offset0, modifier, dmabuf_sync,
+            blit_program_, false, raw))
+    {
+        return false;
+    }
+
+    return readback_to_float(raw, out_rgba32f);
+}
+
+void DmabufGlReader::set_color_uniforms(const ColorTransformConfig &color, bool output_rgb)
+{
+    // 0: SDR native primaries, 1: HDR already PQ, 2: HDR gamma 2.2 -> PQ,
+    // 3: assumed target (pass through).
+    GLint mode = 3;
+    switch (color.source)
+    {
+    case SourceEncoding::SdrDisplayNative:
+        mode = 0;
+        break;
+    case SourceEncoding::HdrPqBt2020:
+        mode = color.pq_input_is_gamma22 ? 2 : 1;
+        break;
+    case SourceEncoding::AssumedTarget:
+        mode = 3;
+        break;
+    }
+
+    GLfloat display_to_target[9];
+    GLfloat rgb_to_yuv[9];
+    mat3_to_column_major(color.display_to_target, display_to_target);
+    mat3_to_column_major(color.target_rgb_to_yuv, rgb_to_yuv);
+
+    glUseProgram(color_program_.id);
+    glUniformMatrix3fv(color_program_.display_to_target, 1, GL_FALSE, display_to_target);
+    glUniformMatrix3fv(color_program_.rgb_to_yuv, 1, GL_FALSE, rgb_to_yuv);
+    glUniform1f(color_program_.decode_gamma, static_cast<GLfloat>(color.display_decode_gamma));
+    glUniform1f(color_program_.pq_scale, static_cast<GLfloat>(color.pq_scale));
+    glUniform1i(color_program_.mode, mode);
+    glUniform1i(color_program_.output, output_rgb ? 1 : 0);
+}
+
+bool DmabufGlReader::read_dmabuf_to_yuv444p16(
+    int dmabuf_fd,
+    uint32_t fb_width,
+    uint32_t fb_height,
+    uint32_t out_width,
+    uint32_t out_height,
+    float uv_off_x,
+    float uv_off_y,
+    float uv_scale_x,
+    float uv_scale_y,
+    uint32_t fourcc,
+    uint32_t pitch0,
+    uint32_t offset0,
+    uint64_t modifier,
+    bool dmabuf_sync,
+    const ColorTransformConfig &color,
+    std::vector<uint16_t> &y,
+    std::vector<uint16_t> &u,
+    std::vector<uint16_t> &v)
+{
+    if (!supports_gpu_color())
+        return false;
+
+    set_color_uniforms(color, /*output_rgb=*/false);
+
+    // The colour uniforms are per-program state, so render_and_readback() can
+    // re-bind the same program without clearing them.
+    std::vector<uint8_t> raw;
+    if (!render_and_readback(
+            dmabuf_fd, fb_width, fb_height, out_width, out_height,
+            uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
+            fourcc, pitch0, offset0, modifier, dmabuf_sync,
+            color_program_, true, raw))
+    {
+        return false;
+    }
+
+    // With a 16-bit unorm target the samples are already final; only the
+    // interleaved layout has to be split into planes.
+    if (readback_format_ == ReadbackFormat::Rgba16Unorm)
+    {
+        const size_t px = static_cast<size_t>(out_width) * out_height;
+        if (raw.size() < px * 4u * sizeof(uint16_t))
+            return false;
+
+        return split_yuv444p16(
+            reinterpret_cast<const uint16_t *>(raw.data()), out_width, out_height, 4, y, u, v);
+    }
+
+    std::vector<float> interleaved;
+    if (!readback_to_float(raw, interleaved))
+        return false;
+
+    return quantize_yuv444p16(interleaved.data(), out_width, out_height, 4, y, u, v);
+}
+
+bool DmabufGlReader::read_dmabuf_to_rgb16(
+    int dmabuf_fd,
+    uint32_t fb_width,
+    uint32_t fb_height,
+    uint32_t out_width,
+    uint32_t out_height,
+    float uv_off_x,
+    float uv_off_y,
+    float uv_scale_x,
+    float uv_scale_y,
+    uint32_t fourcc,
+    uint32_t pitch0,
+    uint32_t offset0,
+    uint64_t modifier,
+    bool dmabuf_sync,
+    const ColorTransformConfig &color,
+    std::vector<uint16_t> &rgb)
+{
+    if (!supports_gpu_color())
+        return false;
+
+    set_color_uniforms(color, /*output_rgb=*/true);
+
+    std::vector<uint8_t> raw;
+    if (!render_and_readback(
+            dmabuf_fd, fb_width, fb_height, out_width, out_height,
+            uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
+            fourcc, pitch0, offset0, modifier, dmabuf_sync,
+            color_program_, true, raw))
+    {
+        return false;
+    }
+
+    // libavif consumes 16-bit RGB directly, so this path needs the 16-bit
+    // target; anything else falls back to the CPU path in the caller.
+    if (readback_format_ != ReadbackFormat::Rgba16Unorm)
+        return false;
+
+    const size_t px = static_cast<size_t>(out_width) * out_height;
+    if (raw.size() < px * 4u * sizeof(uint16_t))
+        return false;
+
+    const auto *src = reinterpret_cast<const uint16_t *>(raw.data());
+    rgb.resize(px * 3u);
+    for (size_t i = 0; i < px; ++i)
+    {
+        rgb[i * 3u + 0] = src[i * 4u + 0];
+        rgb[i * 3u + 1] = src[i * 4u + 1];
+        rgb[i * 3u + 2] = src[i * 4u + 2];
+    }
+
+    return true;
+}
+
+bool DmabufGlReader::framebuffer_complete()
+{
+    GLint prev_fb = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, readback_tex_, 0);
+    const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fb));
+    return complete;
+}
+
+bool DmabufGlReader::verify_fp32_readback()
+{
+    if (!framebuffer_complete())
+        return false;
+
+    GLint prev_fb = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+
+    glViewport(0, 0, 1, 1);
+    // < 1/255 so an 8-bit target quantizes to 0 while FP32 keeps it.
+    // This only verifies if we have at least ~9 bits of precision
+    // [FIXME] check for at least F16 precision instead of anything above 8 
+    const float testv = 0.001f;
+    glClearColor(testv, testv, testv, testv);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    float tmp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, tmp);
+    glFinish();
+
+    const bool ok = !gl_has_error("sanity-readback(glReadPixels)") && tmp[0] > 5e-4f;
+    if (ok)
+        std::cerr << "FP32 readback target verification passed (got " << tmp[0] << ")\n";
+
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fb));
+    return ok;
+}
+
+bool DmabufGlReader::ensure_readback_target(uint32_t w, uint32_t h, bool prefer_u16)
+{
+    const ReadbackFormat want =
+        prefer_u16 ? ReadbackFormat::Rgba16Unorm
+                   : (high_precision_path_ ? ReadbackFormat::Rgba32f : ReadbackFormat::Rgba8);
+
+    if (rb_w_ == w && rb_h_ == h && readback_format_ == want)
         return true;
 
     glBindTexture(GL_TEXTURE_2D, readback_tex_);
+
+    // The colour pass only needs 16 bits per sample. Reading a 16-bit unorm
+    // target back with glReadPixels(GL_UNSIGNED_SHORT) halves the transfer
+    // compared to RGBA32F and already yields the final quantized samples, so the
+    // CPU only has to de-interleave them. RGBA16 is not a required
+    // colour-renderable format in GLES3, so it is probed first.
+    if (want == ReadbackFormat::Rgba16Unorm)
+    {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16, static_cast<GLsizei>(w), static_cast<GLsizei>(h),
+                     0, GL_RGBA, GL_UNSIGNED_SHORT, nullptr);
+
+        if (!gl_has_error("glTexImage2D(readback RGBA16)") && framebuffer_complete())
+        {
+            rb_w_ = w;
+            rb_h_ = h;
+            readback_format_ = ReadbackFormat::Rgba16Unorm;
+            std::cerr << "Readback: RGBA16 unorm -> uint16\n";
+            return true;
+        }
+        std::cerr << "Readback: RGBA16 target unusable; falling back to the float path\n";
+    }
 
     if (high_precision_path_)
     {
@@ -451,65 +720,74 @@ bool DmabufGlReader::ensure_readback_target(uint32_t w, uint32_t h)
                          "falling back to RGBA8 path\n";
             high_precision_path_ = false;
         }
+        else if (verify_fp32_readback())
+        {
+            rb_w_ = w;
+            rb_h_ = h;
+            readback_format_ = ReadbackFormat::Rgba32f;
+            std::cerr << "Readback: RGBA32F -> float\n";
+            return true;
+        }
         else
         {
-            GLint prev_fb = 0;
-            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
-            glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, readback_tex_, 0);
-
-            bool hp_ok = false;
-            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
-            {
-                glViewport(0, 0, 1, 1);
-                // < 1/255 so an 8-bit target quantizes to 0 while FP32 keeps it.
-                // This only verifies if we have at least ~9 bits of precision
-                // [FIXME] check for at least F16 precision instead of anything above 8 
-                const float testv = 0.001f;
-                glClearColor(testv, testv, testv, testv);
-                glClear(GL_COLOR_BUFFER_BIT);
-
-                float tmp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, tmp);
-                glFinish();
-
-                if (!gl_has_error("sanity-readback(glReadPixels)") && tmp[0] > 5e-4f)
-                {
-                    hp_ok = true;
-                    std::cerr << "FP32 readback target verification passed (got " << tmp[0] << ")\n";
-                }
-            }
-
-            glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fb));
-
-            if (!hp_ok)
-            {
-                std::cerr << "Readback: RGBA32F appears not usable at runtime -> falling back\n";
-                high_precision_path_ = false;
-            }
+            std::cerr << "Readback: RGBA32F appears not usable at runtime -> falling back\n";
+            high_precision_path_ = false;
         }
     }
 
-    if (!high_precision_path_)
-    {
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA,
-            static_cast<GLsizei>(w),
-            static_cast<GLsizei>(h),
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            nullptr);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA,
+        static_cast<GLsizei>(w),
+        static_cast<GLsizei>(h),
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        nullptr);
 
-        if (gl_has_error("glTexImage2D(readback RGBA8)"))
-            return false;
-    }
+    if (gl_has_error("glTexImage2D(readback RGBA8)"))
+        return false;
 
     rb_w_ = w;
     rb_h_ = h;
+    readback_format_ = ReadbackFormat::Rgba8;
+    std::cerr << "Readback: RGBA8 -> float\n";
     return true;
+}
+
+bool DmabufGlReader::readback_to_float(const std::vector<uint8_t> &raw, std::vector<float> &out) const
+{
+    const size_t px = static_cast<size_t>(rb_w_) * rb_h_;
+    out.resize(px * 4u);
+
+    switch (readback_format_)
+    {
+    case ReadbackFormat::Rgba8:
+        if (raw.size() < out.size())
+            return false;
+        for (size_t i = 0; i < out.size(); ++i)
+            out[i] = static_cast<float>(raw[i]) * (1.0f / 255.0f);
+        return true;
+
+    case ReadbackFormat::Rgba16Unorm:
+    {
+        if (raw.size() < out.size() * sizeof(uint16_t))
+            return false;
+        const auto *p = reinterpret_cast<const uint16_t *>(raw.data());
+        for (size_t i = 0; i < out.size(); ++i)
+            out[i] = static_cast<float>(p[i]) * (1.0f / 65535.0f);
+        return true;
+    }
+
+    case ReadbackFormat::Rgba32f:
+        if (raw.size() < out.size() * sizeof(float))
+            return false;
+        std::memcpy(out.data(), raw.data(), out.size() * sizeof(float));
+        return true;
+    }
+
+    return false;
 }
 
 GLuint DmabufGlReader::compile_shader(GLenum type, const char *src)
@@ -556,7 +834,7 @@ bool DmabufGlReader::gl_has_error(const char *stage)
     return failed;
 }
 
-bool DmabufGlReader::build_blit_program()
+bool DmabufGlReader::link_program(Program &program, const char *fragment_shader)
 {
     static const char *kVs = R"(
       attribute vec2 a_pos;
@@ -568,6 +846,47 @@ bool DmabufGlReader::build_blit_program()
       }
     )";
 
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, kVs);
+    if (!vs)
+        return false;
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_shader);
+    if (!fs)
+    {
+        glDeleteShader(vs);
+        return false;
+    }
+
+    program.id = glCreateProgram();
+    glAttachShader(program.id, vs);
+    glAttachShader(program.id, fs);
+    glBindAttribLocation(program.id, 0, "a_pos");
+    glBindAttribLocation(program.id, 1, "a_uv");
+    glLinkProgram(program.id);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    GLint ok = 0;
+    glGetProgramiv(program.id, GL_LINK_STATUS, &ok);
+    if (!ok)
+    {
+        char log[1024] = {};
+        glGetProgramInfoLog(program.id, sizeof(log), nullptr, log);
+        std::cerr << "Program link failed: " << log << "\n";
+        glDeleteProgram(program.id);
+        program.id = 0;
+        return false;
+    }
+
+    program.pos = glGetAttribLocation(program.id, "a_pos");
+    program.uv = glGetAttribLocation(program.id, "a_uv");
+    program.tex = glGetUniformLocation(program.id, "u_tex");
+    program.uv_off = glGetUniformLocation(program.id, "u_uv_off");
+    program.uv_scale = glGetUniformLocation(program.id, "u_uv_scale");
+    return program.valid();
+}
+
+bool DmabufGlReader::build_blit_program()
+{
     static const char *kFs = R"(
       #extension GL_OES_EGL_image_external : require
       precision highp float;
@@ -581,43 +900,79 @@ bool DmabufGlReader::build_blit_program()
       }
     )";
 
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, kVs);
-    if (!vs)
-        return false;
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, kFs);
-    if (!fs)
-    {
-        glDeleteShader(vs);
-        return false;
-    }
+    return link_program(blit_program_, kFs);
+}
 
-    prog_ = glCreateProgram();
-    glAttachShader(prog_, vs);
-    glAttachShader(prog_, fs);
-    glBindAttribLocation(prog_, 0, "a_pos");
-    glBindAttribLocation(prog_, 1, "a_uv");
-    glLinkProgram(prog_);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
+bool DmabufGlReader::build_color_program()
+{
+    // Mirrors decode_to_target_rgb() + the RGB -> YUV matrix in
+    // color_transform.cpp, so the frame never has to touch the CPU.
+    static const char *kFs = R"(
+      #extension GL_OES_EGL_image_external : require
+      precision highp float;
 
-    GLint ok = 0;
-    glGetProgramiv(prog_, GL_LINK_STATUS, &ok);
-    if (!ok)
-    {
-        char log[1024] = {};
-        glGetProgramInfoLog(prog_, sizeof(log), nullptr, log);
-        std::cerr << "Program link failed: " << log << "\n";
-        glDeleteProgram(prog_);
-        prog_ = 0;
+      varying vec2 v_uv;
+      uniform samplerExternalOES u_tex;
+      uniform vec2 u_uv_off;
+      uniform vec2 u_uv_scale;
+      uniform mat3 u_display_to_target;
+      uniform mat3 u_rgb_to_yuv;
+      uniform float u_decode_gamma;
+      uniform float u_pq_scale;
+      uniform int u_mode;
+      uniform int u_output;
+
+      const float PQ_M1 = 0.1593017578125;
+      const float PQ_M2 = 78.84375;
+      const float PQ_C1 = 0.8359375;
+      const float PQ_C2 = 18.8515625;
+      const float PQ_C3 = 18.6875;
+
+      vec3 srgb_oetf(vec3 x) {
+        vec3 lo = 12.92 * x;
+        vec3 hi = 1.055 * pow(max(x, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+        return mix(lo, hi, step(vec3(0.0031308), x));
+      }
+
+      vec3 pq_oetf(vec3 l) {
+        vec3 lp = pow(clamp(l, 0.0, 1.0), vec3(PQ_M1));
+        return pow((PQ_C1 + PQ_C2 * lp) / (1.0 + PQ_C3 * lp), vec3(PQ_M2));
+      }
+
+      void main() {
+        vec2 uv = u_uv_off + (v_uv * u_uv_scale);
+        vec3 c = texture2D(u_tex, uv).rgb;
+
+        if (u_mode == 0) {
+          // SDR: native gamma decode -> display->target matrix -> sRGB encode.
+          vec3 lin = pow(clamp(c, 0.0, 1.0), vec3(u_decode_gamma));
+          c = clamp(srgb_oetf(u_display_to_target * lin), 0.0, 1.0);
+        } else if (u_mode == 2) {
+          // HDR: gamma 2.2 -> linear -> PQ.
+          c = pq_oetf(pow(clamp(c, 0.0, 1.0), vec3(2.2)) * u_pq_scale);
+        }
+        // u_mode 1 (already PQ) and 3 (assumed target) pass the values through.
+
+        // u_output 0 writes YUV (Y4M); 1 writes the target RGB and leaves the
+        // RGB -> YUV conversion (and chroma downsampling) to libavif.
+        if (u_output == 0) {
+          gl_FragColor = vec4(u_rgb_to_yuv * c + vec3(0.0, 0.5, 0.5), 1.0);
+        } else {
+          gl_FragColor = vec4(c, 1.0);
+        }
+      }
+    )";
+
+    if (!link_program(color_program_, kFs))
         return false;
-    }
 
-    loc_pos_ = glGetAttribLocation(prog_, "a_pos");
-    loc_uv_ = glGetAttribLocation(prog_, "a_uv");
-    loc_tex_ = glGetUniformLocation(prog_, "u_tex");
-    loc_uv_off_ = glGetUniformLocation(prog_, "u_uv_off");
-    loc_uv_scale_ = glGetUniformLocation(prog_, "u_uv_scale");
-    return loc_pos_ >= 0 && loc_uv_ >= 0 && loc_tex_ >= 0 && loc_uv_off_ >= 0 && loc_uv_scale_ >= 0;
+    color_program_.display_to_target = glGetUniformLocation(color_program_.id, "u_display_to_target");
+    color_program_.rgb_to_yuv = glGetUniformLocation(color_program_.id, "u_rgb_to_yuv");
+    color_program_.decode_gamma = glGetUniformLocation(color_program_.id, "u_decode_gamma");
+    color_program_.pq_scale = glGetUniformLocation(color_program_.id, "u_pq_scale");
+    color_program_.mode = glGetUniformLocation(color_program_.id, "u_mode");
+    color_program_.output = glGetUniformLocation(color_program_.id, "u_output");
+    return color_program_.valid();
 }
 
 void DmabufGlReader::shutdown()
@@ -632,8 +987,10 @@ void DmabufGlReader::shutdown()
 
         if (vbo_)
             glDeleteBuffers(1, &vbo_);
-        if (prog_)
-            glDeleteProgram(prog_);
+        if (color_program_.id)
+            glDeleteProgram(color_program_.id);
+        if (blit_program_.id)
+            glDeleteProgram(blit_program_.id);
         if (fbo_)
             glDeleteFramebuffers(1, &fbo_);
         if (readback_tex_)
@@ -661,10 +1018,12 @@ void DmabufGlReader::shutdown()
     import_tex_ = 0;
     readback_tex_ = 0;
     fbo_ = 0;
-    prog_ = 0;
+    blit_program_ = Program{};
+    color_program_ = ColorProgram{};
     vbo_ = 0;
     rb_w_ = 0;
     rb_h_ = 0;
+    readback_format_ = ReadbackFormat::Rgba8;
 }
 
 } // namespace kmshot

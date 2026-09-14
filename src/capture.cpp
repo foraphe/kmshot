@@ -8,9 +8,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -122,6 +125,140 @@ void quantize_rgba_output(
         }
     }
 }
+
+// Crops an interleaved 16-bit buffer (1 channel for a YUV plane, 3 for packed
+// RGB) the same way the RGBA path crops its float buffer.
+std::vector<uint16_t> crop_interleaved_16(
+    const std::vector<uint16_t> &src, uint32_t src_width, uint32_t channels, const CropRect &crop)
+{
+    std::vector<uint16_t> out;
+    out.reserve(static_cast<size_t>(crop.w) * crop.h * channels);
+
+    for (uint32_t row = 0; row < crop.h; ++row)
+    {
+        const uint16_t *begin =
+            src.data() + (static_cast<size_t>(crop.y + row) * src_width + crop.x) * channels;
+        out.insert(out.end(), begin, begin + static_cast<size_t>(crop.w) * channels);
+    }
+
+    return out;
+}
+
+// Writes Y4M frames from a separate thread so that a slow consumer (an encoder
+// reading the pipe) cannot stall the capture loop. The bounded queue keeps the
+// additional latency and memory in check.
+class AsyncY4mWriter
+{
+public:
+    AsyncY4mWriter(std::ostream &os, int fps, size_t capacity)
+        : os_(os), fps_(std::max(1, fps)), capacity_(capacity),
+          thread_(&AsyncY4mWriter::run, this)
+    {
+    }
+
+    ~AsyncY4mWriter()
+    {
+        // Harmless if close() already ran; prevents a joinable thread from
+        // terminating the process.
+        close();
+    }
+
+    AsyncY4mWriter(const AsyncY4mWriter &) = delete;
+    AsyncY4mWriter &operator=(const AsyncY4mWriter &) = delete;
+
+    // Blocks while the queue is full. The plane buffers are moved into the
+    // queue, so the caller may reuse its own vectors afterwards.
+    bool push(std::vector<uint16_t> &&y,
+              std::vector<uint16_t> &&u,
+              std::vector<uint16_t> &&v,
+              uint32_t width,
+              uint32_t height)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        not_full_.wait(lock, [this] { return queue_.size() < capacity_ || failed_; });
+        if (failed_)
+            return false;
+
+        queue_.push_back(Frame{std::move(y), std::move(u), std::move(v), width, height});
+        not_empty_.notify_one();
+        return true;
+    }
+
+    // Drains the queue and joins the writer thread.
+    bool close()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closed_ = true;
+        }
+        not_empty_.notify_all();
+        not_full_.notify_all();
+
+        if (thread_.joinable())
+            thread_.join();
+
+        return !failed_;
+    }
+
+private:
+    struct Frame
+    {
+        std::vector<uint16_t> y;
+        std::vector<uint16_t> u;
+        std::vector<uint16_t> v;
+        uint32_t width{0};
+        uint32_t height{0};
+    };
+
+    void run()
+    {
+        bool header_written = false;
+
+        for (;;)
+        {
+            Frame frame;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                not_empty_.wait(lock, [this] { return !queue_.empty() || closed_; });
+                if (queue_.empty())
+                    break; // closed and fully drained
+
+                frame = std::move(queue_.front());
+                queue_.pop_front();
+                not_full_.notify_one();
+            }
+
+            bool ok = true;
+            if (!header_written)
+            {
+                ok = write_y4m_header(os_, frame.width, frame.height, fps_, 1);
+                header_written = ok;
+            }
+            if (ok)
+                ok = write_y4m_frame(os_, frame.y, frame.u, frame.v);
+
+            if (!ok)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                failed_ = true;
+                not_full_.notify_all();
+                break;
+            }
+        }
+    }
+
+    std::ostream &os_;
+    int fps_;
+    size_t capacity_;
+
+    std::mutex mutex_;
+    std::condition_variable not_empty_;
+    std::condition_variable not_full_;
+    std::deque<Frame> queue_;
+    bool closed_{false};
+    bool failed_{false};
+    std::thread thread_;
+};
 
 } // namespace
 
@@ -274,7 +411,17 @@ int run_capture(const Options &opts,
     std::vector<float> rgba32f;
     std::vector<uint16_t> rgba16;
     std::vector<uint16_t> y16, u16, v16;
-    bool y4m_header_written = false;
+    std::vector<uint16_t> rgb16;
+
+    // Y4M output is written on its own thread so that a slow pipe consumer does
+    // not throttle the capture.
+    std::unique_ptr<AsyncY4mWriter> y4m_writer;
+    if (opts.pp_y4m)
+    {
+        std::ostream &os = opts.write_to_stdout ? static_cast<std::ostream &>(std::cout)
+                                                : static_cast<std::ostream &>(out);
+        y4m_writer = std::make_unique<AsyncY4mWriter>(os, opts.fps, 2);
+    }
 
     uint32_t out_w = 0, out_h = 0;
     uint32_t last_written_w = 0, last_written_h = 0;
@@ -282,32 +429,56 @@ int run_capture(const Options &opts,
     bool crop_warned = false;
     bool warned_non_sdr = false;
 
+    // The GPU colour pipeline covers Y4M (YUV output) and AVIF (target RGB
+    // output). The raw path needs the untouched RGB(A) frame and stays on the
+    // CPU. It degrades to the CPU transform at any point.
+    const bool gpu_color_requested = (opts.pp_y4m || avif_mode) && !opts.force_cpu_color;
+    bool gpu_color = gpu_color_requested && reader->supports_gpu_color();
+    if (gpu_color)
+        std::cerr << "Colour transform: GPU (fragment shader)\n";
+    else if (gpu_color_requested)
+        std::cerr << "Colour transform: CPU (GPU pipeline unavailable, or --cpu-color)\n";
+    else if (opts.force_cpu_color)
+        std::cerr << "Colour transform: CPU (--cpu-color)\n";
+    else
+        std::cerr << "Colour transform: CPU (this output needs the raw RGB(A) frame)\n";
+
     SlurpRegion region = slurp_region;
     std::optional<PlaneSelection> plane = initial_plane;
 
+    // Absolute-deadline pacing. Sleeping a full frame interval *after* the work
+    // (as this used to) makes the effective rate 1/(work + interval) and adds the
+    // whole interval to the capture latency. Waiting until the next slot instead
+    // keeps the requested rate as long as one frame fits in the budget, and
+    // catches up immediately when it does not.
+    auto next_frame_time = std::chrono::steady_clock::now();
+
     for (int i = 0; i < opts.frames; ++i)
     {
+        if (i > 0)
+        {
+            next_frame_time += frame_delay;
+            std::this_thread::sleep_until(next_frame_time);
+        }
+
         PlanePtr current(drmModeGetPlane(card_fd, plane->plane_id), drmModeFreePlane);
         if (!current || current->fb_id == 0)
         {
             plane = find_capture_plane(card_fd, opts.monitor);
             if (!plane)
                 break;
-            std::this_thread::sleep_for(frame_delay);
             continue;
         }
 
         auto fb = FramebufferInfo::load(card_fd, current->fb_id);
         if (!fb || fb->handles[0] == 0)
         {
-            std::this_thread::sleep_for(frame_delay);
             continue;
         }
 
         if (!is_single_plane_rgb_fourcc(fb->fourcc))
         {
             std::cerr << "Unsupported framebuffer format: " << fourcc_to_string(fb->fourcc) << "\n";
-            std::this_thread::sleep_for(frame_delay);
             continue;
         }
 
@@ -344,12 +515,57 @@ int run_capture(const Options &opts,
         int dmabuf_fd = -1;
         if (drmPrimeHandleToFD(card_fd, fb->handles[0], DRM_CLOEXEC, &dmabuf_fd) != 0)
         {
-            std::this_thread::sleep_for(frame_delay);
             continue;
         }
         ScopedFd dma(dmabuf_fd);
 
-        if (!reader->read_dmabuf_to_rgba32f(
+        // Prefer the GPU colour pipeline: it produces the finished YUV or RGB
+        // samples directly, so the pixels never pass through the CPU.
+        bool have_yuv = false;
+        bool have_rgb16 = false;
+        if (gpu_color)
+        {
+            if (avif_mode)
+            {
+                have_rgb16 = reader->read_dmabuf_to_rgb16(
+                    dma.fd,
+                    fb->width, fb->height,
+                    cap_w, cap_h,
+                    uv_off_x, uv_off_y,
+                    uv_scale_x, uv_scale_y,
+                    fb->fourcc,
+                    fb->pitches[0],
+                    fb->offsets[0],
+                    fb->modifier,
+                    opts.dmabuf_sync,
+                    color,
+                    rgb16);
+            }
+            else
+            {
+                have_yuv = reader->read_dmabuf_to_yuv444p16(
+                    dma.fd,
+                    fb->width, fb->height,
+                    cap_w, cap_h,
+                    uv_off_x, uv_off_y,
+                    uv_scale_x, uv_scale_y,
+                    fb->fourcc,
+                    fb->pitches[0],
+                    fb->offsets[0],
+                    fb->modifier,
+                    opts.dmabuf_sync,
+                    color,
+                    y16, u16, v16);
+            }
+
+            if (!have_yuv && !have_rgb16)
+            {
+                gpu_color = false;
+                std::cerr << "GPU colour pipeline failed; falling back to the CPU colour transform\n";
+            }
+        }
+
+        if (!have_yuv && !have_rgb16 && !reader->read_dmabuf_to_rgba32f(
                 dma.fd,
                 fb->width, fb->height,
                 cap_w, cap_h,
@@ -367,8 +583,8 @@ int run_capture(const Options &opts,
                 reader = std::make_unique<DmabufGlReader>();
                 if (!reader->init(card_fd))
                     return 1;
+                gpu_color = gpu_color_requested && reader->supports_gpu_color();
             }
-            std::this_thread::sleep_for(frame_delay);
             continue;
         }
 
@@ -380,7 +596,6 @@ int run_capture(const Options &opts,
             CrtcPtr crtc(drmModeGetCrtc(card_fd, plane->crtc_id), drmModeFreeCrtc);
             if (!crtc)
             {
-                std::this_thread::sleep_for(frame_delay);
                 continue;
             }
 
@@ -405,20 +620,32 @@ int run_capture(const Options &opts,
                     crop_warned = true;
                     std::cerr << "Slurp region is outside selected monitor/capture area; skipping frames\n";
                 }
-                std::this_thread::sleep_for(frame_delay);
                 continue;
             }
 
-            std::vector<float> cropped;
-            cropped.reserve(static_cast<size_t>(crop->w) * crop->h * 4u);
-
-            for (uint32_t y = 0; y < crop->h; ++y)
+            if (have_yuv)
             {
-                const float *src = rgba32f.data() +
-                                   (((crop->y + y) * out_w + crop->x) * static_cast<size_t>(4));
-                cropped.insert(cropped.end(), src, src + static_cast<size_t>(crop->w) * 4u);
+                y16 = crop_interleaved_16(y16, out_w, 1, *crop);
+                u16 = crop_interleaved_16(u16, out_w, 1, *crop);
+                v16 = crop_interleaved_16(v16, out_w, 1, *crop);
             }
-            rgba32f = std::move(cropped);
+            else if (have_rgb16)
+            {
+                rgb16 = crop_interleaved_16(rgb16, out_w, 3, *crop);
+            }
+            else
+            {
+                std::vector<float> cropped;
+                cropped.reserve(static_cast<size_t>(crop->w) * crop->h * 4u);
+
+                for (uint32_t y = 0; y < crop->h; ++y)
+                {
+                    const float *src = rgba32f.data() +
+                                       (((crop->y + y) * out_w + crop->x) * static_cast<size_t>(4));
+                    cropped.insert(cropped.end(), src, src + static_cast<size_t>(crop->w) * 4u);
+                }
+                rgba32f = std::move(cropped);
+            }
 
             frame_w = crop->w;
             frame_h = crop->h;
@@ -441,7 +668,17 @@ int run_capture(const Options &opts,
                           << (opts.frames > 1 ? " (sequence)" : " (still)") << "\n";
             }
 
-            if (!avif.add_frame(rgba32f.data(), color, encode_error))
+            // The GPU path already produced the target RGB for this frame;
+            // libavif still does the RGB -> YUV conversion and the subsampling.
+            if (have_rgb16)
+            {
+                if (!avif.add_frame_rgb16(std::move(rgb16), encode_error))
+                {
+                    std::cerr << "error: " << encode_error << "\n";
+                    return 1;
+                }
+            }
+            else if (!avif.add_frame(rgba32f.data(), color, encode_error))
             {
                 std::cerr << "error: " << encode_error << "\n";
                 return 1;
@@ -449,25 +686,18 @@ int run_capture(const Options &opts,
         }
         else if (opts.pp_y4m)
         {
-            if (!transform_rgba32f_to_yuv444p16(
+            // The GPU path already produced the YUV planes for this frame.
+            if (!have_yuv && !transform_rgba32f_to_yuv444p16(
                     rgba32f.data(), frame_w, frame_h, color, y16, u16, v16))
             {
-                std::this_thread::sleep_for(frame_delay);
                 continue;
             }
 
-            std::ostream &os = opts.write_to_stdout ? static_cast<std::ostream &>(std::cout)
-                                                    : static_cast<std::ostream &>(out);
-
-            if (!y4m_header_written)
+            if (!y4m_writer->push(std::move(y16), std::move(u16), std::move(v16), frame_w, frame_h))
             {
-                if (!write_y4m_header(os, frame_w, frame_h, std::max(1, opts.fps), 1))
-                    return 1;
-                y4m_header_written = true;
-            }
-
-            if (!write_y4m_frame(os, y16, u16, v16))
+                std::cerr << "error: failed to write the Y4M output\n";
                 return 1;
+            }
         }
         else
         {
@@ -494,7 +724,6 @@ int run_capture(const Options &opts,
         last_written_h = frame_h;
         ++frames_written;
 
-        std::this_thread::sleep_for(frame_delay);
     }
 
     const uint32_t final_w = last_written_w ? last_written_w : out_w;
@@ -503,6 +732,13 @@ int run_capture(const Options &opts,
     if (frames_written == 0)
     {
         std::cerr << "Capture produced no frames (no usable plane/framebuffer)\n";
+        return 1;
+    }
+
+    // Flush whatever the writer thread still has queued.
+    if (y4m_writer && !y4m_writer->close())
+    {
+        std::cerr << "error: failed while writing the Y4M output\n";
         return 1;
     }
 

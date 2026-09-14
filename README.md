@@ -23,7 +23,7 @@ The checks cover the EDID decoder (against a real panel, cross-checked with `edi
 | `src/cli.*` | Option parsing and `--help` |
 | `src/drm_util.*` | DRM property/plane/framebuffer helpers, EDID blob read |
 | `src/drm_debug.*` | Diagnostic dumps of connector/HDR/colorspace state |
-| `src/dmabuf_gl.*` | DMA-BUF import into EGL/GLES and float readback |
+| `src/dmabuf_gl.*` | DMA-BUF import into EGL/GLES, GPU colour transform and readback |
 | `src/capture.*` | Capture loop, slurp crop geometry, raw RGBA output |
 | `src/color_math.*` | 3x3 matrix math, gamut presets, LittleCMS2 matrix extraction |
 | `src/color_profile.*` | Resolves display primaries + target space into a transform |
@@ -75,6 +75,18 @@ A single frame (`--frames 1`) produces a still AVIF (`ftyp` brand `avif`); sever
 
 ### Colour handling
 For SDR captures (DRM connector `Colorspace = 0`) the compositor blends in the display's native primaries, so the tool has to convert those values into a well defined colour space before writing them out. Instead of carrying a hardcoded matrix, the display primaries and white point are now read from the monitor's EDID and the conversion matrix is computed by LittleCMS 2 (relative colorimetric intent, i.e. Bradford chromatic adaptation between the two white points).
+
+#### Where the conversion runs
+For Y4M and AVIF output the colour management runs in a fragment shader while the DMA-BUF is still on the GPU. The shader does the source decode, the display→target matrix and the target transfer function in both cases; for Y4M it also applies the RGB→YUV matrix and the finished 16-bit YUV planes are read back, while for AVIF it stops at target RGB (still 16-bit) and lets libavif do the RGB→YUV conversion and the chroma downsampling. On a 2560×1600 frame this is roughly an order of magnitude cheaper than doing it on the CPU, which is what makes real-time capture feasible.
+
+The GPU path needs a GLES3 context with `GL_EXT_color_buffer_float` (the same requirement as the FP32 readback path); the colour shader is only built when that is available. If it is missing, if the shader fails to build, or if a frame fails at runtime, the capture automatically falls back to the CPU transform and says so on stderr; `--cpu-color` forces the CPU path. The CPU fallback evaluates the transfer functions through sqrt-indexed lookup tables (within one 16-bit LSB of the exact formulas). Raw RGBA output uses the CPU path, because it needs the untouched framebuffer values.
+
+The colour pass renders into a 16-bit unorm target and is read back with `glReadPixels(GL_UNSIGNED_SHORT)`, so the samples arrive already quantized: the CPU only de-interleaves them (~3 ms at 2560×1600, versus ~17 ms for a float readback and ~91 ms for the full CPU transform). If the driver cannot render to `RGBA16` the FP32 target is used instead — Y4M then keeps working through the CPU quantization, and AVIF falls back to the float RGB path.
+
+#### Frame pacing and output threads
+Frames are paced against an absolute deadline (`sleep_until(start + i / fps)`) rather than sleeping a full interval after each frame's work. The old scheme made the effective rate `1 / (work + interval)` and added the whole interval to the capture latency even when the work was fast.
+
+Y4M output is written by a separate thread through a small bounded queue (2 frames), so a slow consumer — an encoder reading the pipe — cannot stall the capture loop; only a sustained backlog does. Raw and AVIF output are still written inline.
 
 The display profile is resolved in this order:
 
@@ -157,6 +169,7 @@ Colour handling
   --colorspace N          Override the connector Colorspace property value
   --pq-input auto|gamma22|pq
                           How HDR (Colorspace 9) pixels are encoded (default auto)
+  --cpu-color             Force the CPU colour transform instead of the GL shader
 
 Misc
   --list-gamuts           List the built-in gamut presets and exit
@@ -190,4 +203,4 @@ To verify if the tool works properly on a given system, it's possible to take a 
 - VRAM framebuffers are usually not directly in a decodable format, and this tool used DMA-BUF to map the images into a GL context and read the pixels back. The implementation is not very optimized and can incur significant CPU overhead compared to the Sunshine kmsgrab implementation.
 - I have little knowledge about color science,  if you see any mistakes or have suggestions on improving the project, please let me know!
 - However, this is a project coming out of a sudden burst of curiosity, and it might not be maintained in the long run (also see my other abandoned projects). Hopefully, soon we will have proper protocols and APIs for such functionalities in Wayland.
-- Technically, this tool is built with support for streaming frames in mind, but frame synchronization is not implemented and the current implementation is too CPU-heavy for real-time capture, so it's discouraged to run it with `--frames` set to more than 1 for now. The tool also doesn't support capturing from multiple planes, so OSDs and cursors that are rendered on separate planes won't be captured.
+- Technically, this tool is built with support for streaming frames in mind. With Y4M output the colour transform runs on the GPU, the readback is 16-bit and the writer is on its own thread, which is enough for real-time capture at typical desktop resolutions — but the frame the compositor is scanning out is not synchronised with a page flip, so a capture can still tear or repeat a frame. The tool also doesn't support capturing from multiple planes, so OSDs and cursors that are rendered on separate planes won't be captured.

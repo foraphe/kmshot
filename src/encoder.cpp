@@ -49,6 +49,7 @@ struct AvifWriter::Impl
     bool sequence{false};
     bool added{false};
     std::vector<uint16_t> rgb;
+    uint32_t rgb_depth{kDepth};
     avifImage *image{nullptr};
     avifEncoder *encoder{nullptr};
 
@@ -154,23 +155,17 @@ bool AvifWriter::open(const std::string &path,
     return true;
 }
 
-bool AvifWriter::add_frame(const float *rgba, const ColorTransformConfig &color, std::string &error)
+bool AvifWriter::submit(std::string &error)
 {
-    if (!is_open())
+    if (impl_->rgb.size() < static_cast<size_t>(impl_->width) * impl_->height * 3u)
     {
-        error = "AVIF encoder is not open";
-        return false;
-    }
-
-    if (!transform_rgba32f_to_rgb10(rgba, impl_->width, impl_->height, color, impl_->rgb))
-    {
-        error = "failed to convert the captured frame to RGB";
+        error = "captured frame has the wrong size";
         return false;
     }
 
     avifRGBImage rgb;
     avifRGBImageSetDefaults(&rgb, impl_->image);
-    rgb.depth = kDepth;
+    rgb.depth = impl_->rgb_depth;
     rgb.format = AVIF_RGB_FORMAT_RGB;
     rgb.pixels = reinterpret_cast<uint8_t *>(impl_->rgb.data());
     rgb.rowBytes = impl_->width * 3u * kRgbBytesPerSample;
@@ -196,6 +191,44 @@ bool AvifWriter::add_frame(const float *rgba, const ColorTransformConfig &color,
 
     impl_->added = true;
     return true;
+}
+
+bool AvifWriter::add_frame(const float *rgba, const ColorTransformConfig &color, std::string &error)
+{
+    if (!is_open())
+    {
+        error = "AVIF encoder is not open";
+        return false;
+    }
+
+    if (!transform_rgba32f_to_rgb10(rgba, impl_->width, impl_->height, color, impl_->rgb))
+    {
+        error = "failed to convert the captured frame to RGB";
+        return false;
+    }
+    impl_->rgb_depth = kDepth;
+
+    return submit(error);
+}
+
+bool AvifWriter::add_frame_rgb16(std::vector<uint16_t> &&rgb, std::string &error)
+{
+    if (!is_open())
+    {
+        error = "AVIF encoder is not open";
+        return false;
+    }
+
+    if (rgb.size() != static_cast<size_t>(impl_->width) * impl_->height * 3u)
+    {
+        error = "GPU frame has the wrong size";
+        return false;
+    }
+
+    impl_->rgb = std::move(rgb);
+    impl_->rgb_depth = 16;
+
+    return submit(error);
 }
 
 bool AvifWriter::finish(std::string &error)

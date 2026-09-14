@@ -357,6 +357,61 @@ int main()
         std::remove(path.c_str());
     }
 
+    // --- Pixel round-trip through the 16-bit RGB entry point used by the GPU
+    // colour shader. libavif scales it to the 10-bit image depth itself.
+    {
+        std::cout << "Pixel round-trip (16-bit RGB, as produced by the GPU):\n";
+        const std::string path = "kmshot_avif_test_rgb16.avif";
+        AvifSettings settings;
+        settings.subsampling = "444";
+
+        ColorTransformConfig cfg = make_config(false, true);
+
+        std::string error;
+        AvifWriter writer;
+        const bool opened = writer.open(path, width, height, settings, cfg, false, 30, error);
+        check(opened, "encoder opens" + (opened ? "" : ": " + error));
+
+        std::vector<uint16_t> rgb16(static_cast<size_t>(width) * height * 3u, 32768);
+        check(writer.add_frame_rgb16(std::move(rgb16), error),
+              "16-bit RGB frame accepted" + (error.empty() ? "" : ": " + error));
+        check(writer.finish(error), "encoding succeeded" + (error.empty() ? "" : ": " + error));
+
+        avifDecoder *decoder = avifDecoderCreate();
+        avifImage *image = avifImageCreateEmpty();
+        const bool decoded = decoder && image &&
+                             avifDecoderReadFile(decoder, image, path.c_str()) == AVIF_RESULT_OK;
+        check(decoded, "output decodes");
+        if (decoded)
+        {
+            avifRGBImage rgb;
+            avifRGBImageSetDefaults(&rgb, image);
+            rgb.format = AVIF_RGB_FORMAT_RGB;
+
+            if (avifRGBImageAllocatePixels(&rgb) == AVIF_RESULT_OK &&
+                avifImageYUVToRGB(image, &rgb) == AVIF_RESULT_OK)
+            {
+                const auto *px = reinterpret_cast<const uint16_t *>(rgb.pixels);
+                const int r = px[0];
+                const int g = px[1];
+                const int b = px[2];
+                std::cout << "       decoded RGB(" << r << ", " << g << ", " << b
+                          << "), expected ~(512, 512, 512)\n";
+                check(std::abs(r - 512) <= 8 && std::abs(g - 512) <= 8 && std::abs(b - 512) <= 8,
+                      "16-bit RGB round-trips to the same 10-bit value");
+                avifRGBImageFreePixels(&rgb);
+            }
+            else
+            {
+                check(false, "YUV -> RGB conversion succeeded");
+            }
+        }
+
+        avifImageDestroy(image);
+        avifDecoderDestroy(decoder);
+        std::remove(path.c_str());
+    }
+
     if (g_failures != 0)
     {
         std::cout << g_failures << " check(s) failed\n";

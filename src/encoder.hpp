@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "color_transform.hpp"
 
@@ -57,10 +58,17 @@ public:
 
     bool add_frame(const float *rgba, const ColorTransformConfig &color, std::string &error);
 
+    // Adds a frame whose target-space RGB has already been produced (the GPU
+    // colour shader), as interleaved 16-bit samples. libavif converts it to YUV
+    // and performs the chroma downsampling exactly like the float path.
+    bool add_frame_rgb16(std::vector<uint16_t> &&rgb, std::string &error);
+
     // Encodes and writes the file. Safe to call when nothing was opened.
     bool finish(std::string &error);
 
 private:
+    bool submit(std::string &error);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

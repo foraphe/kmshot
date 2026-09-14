@@ -101,6 +101,16 @@ int main(int argc, char **argv)
         break;
     }
 
+    // A forgotten --stdout used to look like "ffmpeg hangs forever": the tool
+    // writes to a file while the consumer waits on an empty pipe until it sees
+    // EOF and reports "Header too large.". Say so instead.
+    if (!opts.write_to_stdout && opts.avif_out.empty() && !isatty(STDOUT_FILENO))
+    {
+        std::cerr << "Warning: stdout is not a terminal but --stdout was not given; "
+                     "the capture will be written to '" << opts.out_path
+                  << "' instead (pass --stdout to pipe it)\n";
+    }
+
     // Offline EDID inspection does not need a DRM node or stdin.
     if (opts.print_edid && !opts.edid_path.empty())
     {

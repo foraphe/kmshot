@@ -79,4 +79,29 @@ bool transform_rgba32f_to_rgb10(
     const ColorTransformConfig &config,
     std::vector<uint16_t> &out);
 
+// Quantizes an interleaved full-range YUV float buffer (Y, U, V each in [0, 1],
+// already including the +0.5 chroma offset) into full-range 16-bit planes. Used
+// for the YUV produced by the GPU colour pipeline. `channels` is the number of
+// floats per pixel in `yuv` (3 or 4).
+bool quantize_yuv444p16(
+    const float *yuv,
+    uint32_t width,
+    uint32_t height,
+    uint32_t channels,
+    std::vector<uint16_t> &y,
+    std::vector<uint16_t> &u,
+    std::vector<uint16_t> &v);
+
+// De-interleaves an already-quantized 16-bit YUV buffer (the RGBA16 readback of
+// the GPU colour shader, with Y, U and V in R, G and B) into planar output.
+// This is a pure copy, so the readback needs no further conversion on the CPU.
+bool split_yuv444p16(
+    const uint16_t *yuv,
+    uint32_t width,
+    uint32_t height,
+    uint32_t channels,
+    std::vector<uint16_t> &y,
+    std::vector<uint16_t> &u,
+    std::vector<uint16_t> &v);
+
 } // namespace kmshot

@@ -122,6 +122,7 @@ void print_usage(std::ostream &os, const char *argv0)
        << "  --colorspace N          Override the connector Colorspace property value\n"
        << "  --pq-input auto|gamma22|pq\n"
        << "                          How HDR (Colorspace 9) pixels are encoded (default auto)\n"
+       << "  --cpu-color             Force the CPU colour transform instead of the GL shader\n"
        << "\n"
        << "Misc\n"
        << "  --list-gamuts           List the built-in gamut presets and exit\n"
@@ -172,6 +173,7 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
         {
             if (!need_value(i, a, value)) return ParseStatus::Error;
             opts.out_path = value;
+            opts.out_explicit = true;
         }
         else if (a == "--frames")
         {
@@ -360,6 +362,10 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
                 return ParseStatus::Error;
             }
         }
+        else if (a == "--cpu-color")
+        {
+            opts.force_cpu_color = true;
+        }
         else if (a == "--avif-out")
         {
             if (!need_value(i, a, value)) return ParseStatus::Error;
@@ -454,6 +460,11 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
         error = "--print-edid cannot be combined with --no-edid";
         return ParseStatus::Error;
     }
+
+    // Give the default output file an extension that matches the format, so a
+    // forgotten --stdout does not silently write Y4M data into "*.rgba64le".
+    if (!opts.out_explicit && opts.pp_y4m)
+        opts.out_path = "frames.y4m";
 
     return ParseStatus::Ok;
 }
