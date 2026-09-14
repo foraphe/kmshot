@@ -15,10 +15,15 @@ inline double clamp01d(double v)
     return std::min(1.0, std::max(0.0, v));
 }
 
+inline uint16_t quantize_u16(double v01, double max_value)
+{
+    const double q = clamp01d(v01) * max_value;
+    return static_cast<uint16_t>(std::llround(q));
+}
+
 inline uint16_t q16(double v01)
 {
-    const double q = clamp01d(v01) * 65535.0;
-    return static_cast<uint16_t>(std::llround(q));
+    return quantize_u16(v01, 65535.0);
 }
 
 inline double gamma_to_linear(double v, double gamma)
@@ -33,6 +38,50 @@ inline double srgb_oetf(double lin)
     if (x <= 0.0031308)
         return 12.92 * x;
     return 1.055 * std::pow(x, 1.0 / 2.4) - 0.055;
+}
+
+// Decodes one source pixel (4 interleaved floats) into target-space RGB encoded
+// with the target transfer function. No RGB -> YUV matrix is applied, so this is
+// shared by the YUV and the RGB output paths.
+inline void decode_to_target_rgb(const float *pixel,
+                                 const ColorTransformConfig &config,
+                                 double &r,
+                                 double &g,
+                                 double &b)
+{
+    // Values are deliberately not clamped here: compositors that blend in
+    // scRGB can hand out values outside [0, 1], and clamping is left to the
+    // per-path transfer functions.
+    r = static_cast<double>(pixel[0]);
+    g = static_cast<double>(pixel[1]);
+    b = static_cast<double>(pixel[2]);
+
+    if (config.source == SourceEncoding::HdrPqBt2020)
+    {
+        if (config.pq_input_is_gamma22)
+        {
+            r = static_cast<double>(linear_to_pq(static_cast<float>(
+                gamma_to_linear(r, 2.2) * config.pq_scale)));
+            g = static_cast<double>(linear_to_pq(static_cast<float>(
+                gamma_to_linear(g, 2.2) * config.pq_scale)));
+            b = static_cast<double>(linear_to_pq(static_cast<float>(
+                gamma_to_linear(b, 2.2) * config.pq_scale)));
+        }
+        // Otherwise the values are already PQ encoded.
+    }
+    else if (config.source == SourceEncoding::SdrDisplayNative)
+    {
+        const double r_lin = gamma_to_linear(r, config.display_decode_gamma);
+        const double g_lin = gamma_to_linear(g, config.display_decode_gamma);
+        const double b_lin = gamma_to_linear(b, config.display_decode_gamma);
+
+        const std::array<double, 3> target =
+            config.display_to_target * std::array<double, 3>{r_lin, g_lin, b_lin};
+
+        r = clamp01d(srgb_oetf(target[0]));
+        g = clamp01d(srgb_oetf(target[1]));
+        b = clamp01d(srgb_oetf(target[2]));
+    }
 }
 
 } // namespace
@@ -94,48 +143,14 @@ bool transform_rgba32f_to_yuv444p16(
     u.resize(px);
     v.resize(px);
 
-    const bool hdr_pq = config.source == SourceEncoding::HdrPqBt2020;
-    const bool display_native_sdr = config.source == SourceEncoding::SdrDisplayNative;
-
     const auto &m = config.target_rgb_to_yuv;
-    const auto &dt = config.display_to_target;
-    const double gamma = config.display_decode_gamma;
-    const double pq_scale = config.pq_scale;
 
     for (size_t i = 0; i < px; ++i)
     {
-        // Values are deliberately not clamped here: compositors that blend in
-        // scRGB can hand out values outside [0, 1], and clamping is left to the
-        // per-path transfer functions.
-        double r = static_cast<double>(rgba[i * 4 + 0]);
-        double g = static_cast<double>(rgba[i * 4 + 1]);
-        double b = static_cast<double>(rgba[i * 4 + 2]);
-
-        if (hdr_pq)
-        {
-            if (config.pq_input_is_gamma22)
-            {
-                r = static_cast<double>(linear_to_pq(static_cast<float>(
-                    gamma_to_linear(r, 2.2) * pq_scale)));
-                g = static_cast<double>(linear_to_pq(static_cast<float>(
-                    gamma_to_linear(g, 2.2) * pq_scale)));
-                b = static_cast<double>(linear_to_pq(static_cast<float>(
-                    gamma_to_linear(b, 2.2) * pq_scale)));
-            }
-            // Otherwise the values are already PQ encoded.
-        }
-        else if (display_native_sdr)
-        {
-            const double r_lin = gamma_to_linear(r, gamma);
-            const double g_lin = gamma_to_linear(g, gamma);
-            const double b_lin = gamma_to_linear(b, gamma);
-
-            const std::array<double, 3> target = dt * std::array<double, 3>{r_lin, g_lin, b_lin};
-
-            r = clamp01d(srgb_oetf(target[0]));
-            g = clamp01d(srgb_oetf(target[1]));
-            b = clamp01d(srgb_oetf(target[2]));
-        }
+        double r = 0.0;
+        double g = 0.0;
+        double b = 0.0;
+        decode_to_target_rgb(rgba + i * 4u, config, r, g, b);
 
         const double yy = r * m.m[0][0] + g * m.m[0][1] + b * m.m[0][2];
         const double uu = r * m.m[1][0] + g * m.m[1][1] + b * m.m[1][2];
@@ -144,6 +159,34 @@ bool transform_rgba32f_to_yuv444p16(
         y[i] = q16(yy);
         u[i] = q16(uu + 0.5);
         v[i] = q16(vv + 0.5);
+    }
+
+    return true;
+}
+
+bool transform_rgba32f_to_rgb10(
+    const float *rgba,
+    uint32_t width,
+    uint32_t height,
+    const ColorTransformConfig &config,
+    std::vector<uint16_t> &out)
+{
+    if (!rgba || width == 0 || height == 0)
+        return false;
+
+    const size_t px = static_cast<size_t>(width) * static_cast<size_t>(height);
+    out.resize(px * 3u);
+
+    for (size_t i = 0; i < px; ++i)
+    {
+        double r = 0.0;
+        double g = 0.0;
+        double b = 0.0;
+        decode_to_target_rgb(rgba + i * 4u, config, r, g, b);
+
+        out[i * 3u + 0] = quantize_u16(r, 1023.0);
+        out[i * 3u + 1] = quantize_u16(g, 1023.0);
+        out[i * 3u + 2] = quantize_u16(b, 1023.0);
     }
 
     return true;

@@ -33,6 +33,10 @@ struct ColorTransformConfig
     // Target linear RGB -> full-range YUV (rows are Y, U, V).
     Mat3 target_rgb_to_yuv{Mat3::identity()};
 
+    // True when the target space is BT.2020 (as opposed to BT.709/sRGB).
+    // Encoders that derive their own CICP metadata need this.
+    bool target_bt2020{true};
+
     // Decode exponent applied to display native values (SDR path).
     double display_decode_gamma{2.2};
 
@@ -60,5 +64,19 @@ bool transform_rgba32f_to_yuv444p16(
     std::vector<uint16_t> &y,
     std::vector<uint16_t> &u,
     std::vector<uint16_t> &v);
+
+// Input: interleaved RGBA float buffer, normalized to ~[0..1] per channel.
+// Output: interleaved RGB with 10-bit samples (0..1023, stored in uint16_t),
+// encoded with the target primaries and the transfer function implied by
+// config.source (sRGB for SDR, PQ for HDR).
+//
+// No RGB -> YUV matrix is applied here: this feeds encoders (libavif) which
+// perform the YUV conversion, chroma subsampling and quantization themselves.
+bool transform_rgba32f_to_rgb10(
+    const float *rgba,
+    uint32_t width,
+    uint32_t height,
+    const ColorTransformConfig &config,
+    std::vector<uint16_t> &out);
 
 } // namespace kmshot

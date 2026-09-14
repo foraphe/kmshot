@@ -152,6 +152,7 @@ std::optional<ColorTransformConfig> build_color_transform(
     const GamutPreset *target = find_gamut_preset(target_bt2020 ? "bt2020" : "srgb");
 
     cfg.target_rgb_to_yuv = target_rgb_to_yuv_matrix(target_bt2020);
+    cfg.target_bt2020 = target_bt2020;
 
     if (cfg.source == SourceEncoding::SdrDisplayNative)
     {

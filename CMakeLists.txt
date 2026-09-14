@@ -15,6 +15,7 @@ pkg_check_modules(GBM REQUIRED gbm)
 pkg_check_modules(EGL REQUIRED egl)
 pkg_check_modules(GLES2 REQUIRED glesv2)
 pkg_check_modules(PC_LCMS2 REQUIRED lcms2)
+pkg_check_modules(PC_AVIF REQUIRED libavif)
 
 # Everything except the CLI entry point lives in this static library so the
 # self-checks can link against it.
@@ -28,6 +29,7 @@ add_library(kmshot_core STATIC
   src/drm_debug.cpp
   src/drm_util.cpp
   src/edid.cpp
+  src/encoder.cpp
   src/y4m.cpp
 )
 
@@ -38,6 +40,7 @@ target_include_directories(kmshot_core PUBLIC
   ${EGL_INCLUDE_DIRS}
   ${GLES2_INCLUDE_DIRS}
   ${PC_LCMS2_INCLUDE_DIRS}
+  ${PC_AVIF_INCLUDE_DIRS}
 )
 
 target_compile_options(kmshot_core PRIVATE
@@ -52,6 +55,7 @@ target_link_directories(kmshot_core PUBLIC
   ${EGL_LIBRARY_DIRS}
   ${GLES2_LIBRARY_DIRS}
   ${PC_LCMS2_LIBRARY_DIRS}
+  ${PC_AVIF_LIBRARY_DIRS}
 )
 
 target_link_libraries(kmshot_core PUBLIC
@@ -60,6 +64,7 @@ target_link_libraries(kmshot_core PUBLIC
   ${EGL_LIBRARIES}
   ${GLES2_LIBRARIES}
   ${PC_LCMS2_LIBRARIES}
+  ${PC_AVIF_LIBRARIES}
 )
 
 add_executable(kms_capture src/main.cpp)
@@ -95,4 +100,11 @@ if(KMSHOT_BUILD_TESTS)
   target_compile_options(kmshot_color_transform_test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(kmshot_color_transform_test PRIVATE kmshot_core)
   add_test(NAME color_transform COMMAND kmshot_color_transform_test)
+
+  # Encodes with libavif and decodes the result back to check the CICP, chroma
+  # subsampling and content light level metadata.
+  add_executable(kmshot_avif_test tests/avif_test.cpp)
+  target_compile_options(kmshot_avif_test PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(kmshot_avif_test PRIVATE kmshot_core)
+  add_test(NAME avif_encode COMMAND kmshot_avif_test)
 endif()

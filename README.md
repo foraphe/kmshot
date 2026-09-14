@@ -1,9 +1,9 @@
 # KMShot
 KMShot is an experimental screenshot tool for Linux, written in C++. It reads from the DRM subsystem similar to how [Sunshine](https://github.com/LizardByte/Sunshine)'s `kmsgrab` capture works.
-This tool can be used to capture wide color gamut screenshots or HDR content in higher-than-8-bit color depths, tested on KDE Plasma, Gnome, and Hyprland.
+This tool can be used to capture wide color gamut screenshots or HDR content in higher-than-8-bit color depths, tested on KDE Plasma, Gnome, and Hyprland. Captures can be written as raw RGBA, as Y4M, or encoded straight to AVIF in-process with [libavif](https://github.com/AOMediaCodec/libavif).
 
 ### Building
-KMShot uses CMake as its build system. To build the project, headers for DRM, GBM, EGL, GLES2, and LittleCMS 2 need to be installed. You can build it using the following commands:
+KMShot uses CMake as its build system. To build the project, headers for DRM, GBM, EGL, GLES2, LittleCMS 2, and libavif need to be installed. You can build it using the following commands:
 ```bash
 cmake -S . -B build
 cmake --build build
@@ -14,7 +14,7 @@ The build also produces a few self-check executables. Run them with:
 ```bash
 ctest --test-dir build --output-on-failure
 ```
-The checks cover the EDID decoder (against a real panel, cross-checked with `edid-decode`), the colour matrix computation (LittleCMS2 against an independent primaries + Bradford reference implementation), the RGBA -> YUV conversion, and the slurp region geometry. They can be disabled with `-DKMSHOT_BUILD_TESTS=OFF`.
+The checks cover the EDID decoder (against a real panel, cross-checked with `edid-decode`), the colour matrix computation (LittleCMS2 against an independent primaries + Bradford reference implementation), the RGBA -> YUV/RGB conversion, the slurp region geometry, and the AVIF encoder (the output is decoded back and its CICP, subsampling and content-light-level metadata are verified). They can be disabled with `-DKMSHOT_BUILD_TESTS=OFF`.
 
 ### Project layout
 | Path | Contents |
@@ -29,30 +29,30 @@ The checks cover the EDID decoder (against a real panel, cross-checked with `edi
 | `src/color_profile.*` | Resolves display primaries + target space into a transform |
 | `src/color_transform.*` | RGBA -> YUV444P16 conversion and PQ helpers |
 | `src/edid.*` | EDID base block + CTA-861 extension parser |
+| `src/encoder.*` | AVIF encoding via libavif (still images and sequences) |
 | `src/y4m.*` | YUV4MPEG2 container writer |
 | `tests/`, `tools/` | Self-checks |
 
 ### Usage
-To use this tool, the executable will need to either have `cap_sys_admin` or run as root.
-Example usage (assuming `slurp` and `avifenc` are installed and in PATH):
-SDR YUV444 capture into a 10bpc AVIF (needs caution, see "Important Notes on Color Accuracy" below, and the Y4M bit-depth caveat after the HDR example):
+To use this tool, the executable will need to either have `cap_sys_admin` or be run as root.
+Example usage (assuming `slurp` is installed and in PATH):
+SDR capture encoded to a 10-bit AVIF by the tool itself (needs caution, see "Important Notes on Color Accuracy" below):
 ```bash
-slurp |\
-sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
---stdout --pp-y4m --slurp --slurp-scale <display scaling> | \
-avifenc -q 100 --stdin output_sdr.avif --depth 10 --yuv 444 --cicp 9/13/9 --range full
+slurp | sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
+  --avif-out output_sdr.avif --avif-yuv 420 \
+  --slurp --slurp-scale <display scaling>
 ```
 
 HDR capture (needs HDR to be enabled in the display settings, and the tool only works when DRM reports BT.2020):
 ```bash
-slurp | \
-sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
---max-nits <max-nits> --stdout --pp-y4m --slurp --slurp-scale <display scaling> | \
-avifenc -q 100 --stdin output_hdr.avif --depth 10 --yuv 444 --cicp 9/16/9 --clli <MaxCLL,MaxFALL> --range full
+slurp | sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
+  --max-nits <max-nits> --avif-out output_hdr.avif --avif-yuv 420 \
+  --slurp --slurp-scale <display scaling>
 ```
+MaxCLL/MaxPALL default to the monitor's EDID values (1261/604 cd/m^2 on the NE160QDM-NM7); pass `--avif-clli <MaxCLL,MaxFALL>` to override them.
 Being a screenshot tool, the captured frame would likely not be a well behaved, singular HDR image and instead might contain a mix of SDR (e.g. UI) and HDR content. In this case, it's currently recommended to set the MaxCLL/MaxFALL values according to the monitor's capabilities, so that the screenshot would look similar to the source content, when viewed on a 10000-nit reference display (or displays that have better capabilities than the monitor used for capture). However, this needs further testing, and no testing has been done on setting the values other than the monitor's capabilities.
 
-> **Y4M bit-depth caveat:** `--pp-y4m` currently writes 16-bit samples (`C444p16`). `avifenc`'s Y4M reader accepts only 8, 10 or 12-bit input (and requires `--depth` to match it exactly), so it rejects the current output with `Unsupported y4m pixel format` and the two `| avifenc` examples above do not run as-is. `ffmpeg` does read the 16-bit Y4M correctly.
+> **Y4M note:** `--pp-y4m` is still available for piping into other tools, but it writes 16-bit samples (`C444p16`) and `avifenc`'s Y4M reader only accepts 8, 10 or 12-bit input. Use `--avif-out` when you want an AVIF; `ffmpeg` reads the 16-bit Y4M fine.
 
 Experimental 12bpc capture of linear RGB data into an 16bpc PNG (requires `ffmpeg`, and this WILL look wrong perceptually). The gamma used to linearize the values follows `--display-gamma` (default 2.2):
 ```bash
@@ -62,6 +62,16 @@ ffmpeg -f rawvideo -video_size <width>x<height> -pix_fmt rgba64le -i - \
  ```
 
 [slurp](https://github.com/emersion/slurp) can be used to select the capture area, and without `--slurp` this tool will capture the entire framebuffer. Since `slurp` outputs logical coordinates, the `--slurp-scale` option is used to scale the coordinates to the actual framebuffer size. This needs to match the scaling of the current workspace (display scaling on single-monitor systems).
+
+### AVIF output
+`--avif-out PATH` encodes the capture directly with [libavif](https://github.com/AOMediaCodec/libavif)
+
+- **Depth:** 10-bit.
+- **Chroma subsampling:** `--avif-yuv 444|422|420` (default `444`). The downsampling is done by libavif while it converts the target-space RGB image to YUV, so the colour conversion happens at full resolution and no chroma is discarded before it.
+- **Colour metadata (CICP):** derived from the colour pipeline. The `nclx` (`colr`) box records the target primaries and matrix (BT.2020 for HDR captures, otherwise whatever `--sdr-target` selected), the transfer function (PQ for HDR, sRGB otherwise) and full range. `--avif-cicp P/T/M` overrides all three if a specific consumer needs something else.
+- **Content light level:** for HDR captures MaxCLL/MaxPALL default to the monitor's EDID values; `--avif-clli MAXCLL,MAXFALL` overrides them. SDR captures get no `clli` box.
+
+A single frame (`--frames 1`) produces a still AVIF (`ftyp` brand `avif`); several frames produce an image sequence (`ftyp` brand `avis`) paced at `--fps`. `--avif-out` is mutually exclusive with `--stdout`, `--pp-y4m` and `--sdr-linear-12bpc`.
 
 ### Colour handling
 For SDR captures (DRM connector `Colorspace = 0`) the compositor blends in the display's native primaries, so the tool has to convert those values into a well defined colour space before writing them out. Instead of carrying a hardcoded matrix, the display primaries and white point are now read from the monitor's EDID and the conversion matrix is computed by LittleCMS 2 (relative colorimetric intent, i.e. Bradford chromatic adaptation between the two white points).
@@ -126,6 +136,13 @@ Output format
   --pp-y4m                Write full-range 16-bit YUV444 (Y4M) instead of RGBA64
   --sdr-linear-12bpc      Raw path only: decode --display-gamma and store 12-bit MSB-aligned
   --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)
+
+AVIF output (in-process libavif, highest quality)
+  --avif-out PATH         Encode to a single AVIF file instead of raw RGBA/Y4M
+  --avif-yuv 444|422|420  Chroma subsampling; libavif does the downsampling (default 444)
+  --avif-cicp P/T/M       Override the CICP primaries/transfer/matrix metadata
+  --avif-clli MAXCLL,MAXFALL
+                          Content light level in cd/m^2 (default: EDID values for HDR)
 
 Colour handling
   --edid PATH             Read the display EDID from a file instead of the connector

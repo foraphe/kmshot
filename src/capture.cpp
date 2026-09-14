@@ -2,6 +2,7 @@
 
 #include "dmabuf_gl.hpp"
 #include "drm_util.hpp"
+#include "encoder.hpp"
 #include "y4m.hpp"
 
 #include <algorithm>
@@ -253,8 +254,10 @@ int run_capture(const Options &opts,
     if (!reader->init(card_fd))
         return 1;
 
+    const bool avif_mode = !opts.avif_out.empty();
+
     std::ofstream out;
-    if (!opts.write_to_stdout)
+    if (!opts.write_to_stdout && !avif_mode)
     {
         out.open(opts.out_path, std::ios::binary);
         if (!out)
@@ -263,6 +266,9 @@ int run_capture(const Options &opts,
             return 1;
         }
     }
+
+    AvifWriter avif;
+    std::string encode_error;
 
     const auto frame_delay = std::chrono::milliseconds(1000 / std::max(1, opts.fps));
     std::vector<float> rgba32f;
@@ -418,7 +424,30 @@ int run_capture(const Options &opts,
             frame_h = crop->h;
         }
 
-        if (opts.pp_y4m)
+        if (avif_mode)
+        {
+            if (!avif.is_open())
+            {
+                if (!avif.open(opts.avif_out, frame_w, frame_h, opts.avif, color,
+                               opts.frames > 1,
+                               static_cast<uint32_t>(std::max(1, opts.fps)),
+                               encode_error))
+                {
+                    std::cerr << "error: " << encode_error << "\n";
+                    return 1;
+                }
+                std::cerr << "Encoding AVIF: " << frame_w << "x" << frame_h
+                          << " depth=10 yuv=" << opts.avif.subsampling
+                          << (opts.frames > 1 ? " (sequence)" : " (still)") << "\n";
+            }
+
+            if (!avif.add_frame(rgba32f.data(), color, encode_error))
+            {
+                std::cerr << "error: " << encode_error << "\n";
+                return 1;
+            }
+        }
+        else if (opts.pp_y4m)
         {
             if (!transform_rgba32f_to_yuv444p16(
                     rgba32f.data(), frame_w, frame_h, color, y16, u16, v16))
@@ -475,6 +504,17 @@ int run_capture(const Options &opts,
     {
         std::cerr << "Capture produced no frames (no usable plane/framebuffer)\n";
         return 1;
+    }
+
+    if (avif_mode)
+    {
+        if (!avif.finish(encode_error))
+        {
+            std::cerr << "error: " << encode_error << "\n";
+            return 1;
+        }
+        std::cerr << "Wrote AVIF: " << opts.avif_out << "\n";
+        return 0;
     }
 
     if (!opts.pp_y4m)

@@ -7,6 +7,8 @@
 #include <string>
 #include <utility>
 
+#include "encoder.hpp"
+
 namespace kmshot
 {
 
@@ -33,6 +35,10 @@ struct Options
     float pp_max_nits{0.0f}; // 0 means "auto: take the EDID maximum luminance"
     bool pp_max_nits_explicit{false};
     bool sdr_linear_12bpc{false};
+
+    // --- AVIF output ---
+    std::string avif_out; // --avif-out PATH
+    AvifSettings avif;    // --avif-yuv / --avif-cicp / --avif-clli
 
     // --- colour handling ---
     std::string edid_path;                     // --edid PATH

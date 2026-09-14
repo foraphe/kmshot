@@ -63,6 +63,44 @@ void expect_yuv(const std::string &label,
     expect_yuv_tol(label, cfg, r, g, b, ey, eu, ev, 0);
 }
 
+// Checks the target-space RGB output that is handed to libavif, which applies
+// the RGB -> YUV matrix and the chroma downsampling itself.
+void expect_rgb(const std::string &label,
+                const ColorTransformConfig &cfg,
+                float r,
+                float g,
+                float b,
+                uint16_t er,
+                uint16_t eg,
+                uint16_t eb,
+                int tolerance = 0)
+{
+    const float rgba[4] = {r, g, b, 1.0f};
+    std::vector<uint16_t> rgb;
+    if (!transform_rgba32f_to_rgb10(rgba, 1, 1, cfg, rgb) || rgb.size() != 3)
+    {
+        std::cout << "  FAIL " << label << " (rgb transform failed)\n";
+        ++g_failures;
+        return;
+    }
+
+    const auto near = [tolerance](uint16_t actual, uint16_t expected)
+    {
+        return std::abs(static_cast<int>(actual) - static_cast<int>(expected)) <= tolerance;
+    };
+
+    if (near(rgb[0], er) && near(rgb[1], eg) && near(rgb[2], eb))
+    {
+        std::cout << "  ok   " << label << " -> RGB(" << rgb[0] << ", " << rgb[1] << ", " << rgb[2] << ")\n";
+    }
+    else
+    {
+        std::cout << "  FAIL " << label << " -> RGB(" << rgb[0] << ", " << rgb[1] << ", " << rgb[2]
+                  << "), expected RGB(" << er << ", " << eg << ", " << eb << ")\n";
+        ++g_failures;
+    }
+}
+
 ColorTransformConfig sdr_identity_config()
 {
     ColorTransformConfig cfg;
@@ -149,8 +187,8 @@ int main()
     }
 
     // With the real panel -> target matrix, native white must stay white and
-    // the neutral axis must not pick up a colour cast.
-    if (have_lcms2())
+    // the neutral axis must not pick up a colour cast. LittleCMS2 is a hard
+    // build dependency, so this always runs.
     {
         std::cout << "Panel native -> Rec.709 (LittleCMS2):\n";
         ColorTransformConfig panel;
@@ -174,8 +212,20 @@ int main()
             // chroma on either side of the 32767.5 rounding boundary.
             expect_yuv_tol("panel white -> neutral white", panel, 1.0f, 1.0f, 1.0f, 65535, 32768, 32768, 1);
             expect_yuv_tol("panel black -> neutral black", panel, 0.0f, 0.0f, 0.0f, 0, 32768, 32768, 1);
+            expect_rgb("panel white -> neutral RGB", panel, 1.0f, 1.0f, 1.0f, 1023, 1023, 1023, 1);
         }
     }
+
+    // Target-space RGB for encoders (libavif) that do their own RGB -> YUV.
+    std::cout << "Target RGB (10-bit) output:\n";
+    expect_rgb("black", identity, 0.0f, 0.0f, 0.0f, 0, 0, 0);
+    expect_rgb("white", identity, 1.0f, 1.0f, 1.0f, 1023, 1023, 1023);
+    expect_rgb("red", identity, 1.0f, 0.0f, 0.0f, 1023, 0, 0);
+    expect_rgb("green", identity, 0.0f, 1.0f, 0.0f, 0, 1023, 0);
+    expect_rgb("blue", identity, 0.0f, 0.0f, 1.0f, 0, 0, 1023);
+    expect_rgb("neutral mid gray", identity, mid_gray, mid_gray, mid_gray, 752, 752, 752);
+    expect_rgb("negative clamps to black", identity, -1.0f, -1.0f, -1.0f, 0, 0, 0);
+    expect_rgb("over-range clamps to white", identity, 2.0f, 2.0f, 2.0f, 1023, 1023, 1023);
 
     if (g_failures != 0)
     {

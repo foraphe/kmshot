@@ -56,6 +56,30 @@ std::string to_lower(std::string s)
     return s;
 }
 
+// Parses "A/B/C" into three integers.
+bool parse_slash_triple(const std::string &text, int &a, int &b, int &c)
+{
+    const size_t first = text.find('/');
+    if (first == std::string::npos)
+        return false;
+    const size_t second = text.find('/', first + 1);
+    if (second == std::string::npos)
+        return false;
+
+    return parse_int(text.substr(0, first), a) &&
+           parse_int(text.substr(first + 1, second - first - 1), b) &&
+           parse_int(text.substr(second + 1), c);
+}
+
+// Parses "A,B" into two integers.
+bool parse_comma_pair(const std::string &text, int &a, int &b)
+{
+    const size_t comma = text.find(',');
+    if (comma == std::string::npos)
+        return false;
+    return parse_int(text.substr(0, comma), a) && parse_int(text.substr(comma + 1), b);
+}
+
 } // namespace
 
 void print_usage(std::ostream &os, const char *argv0)
@@ -78,7 +102,14 @@ void print_usage(std::ostream &os, const char *argv0)
        << "  --sdr-linear-12bpc      Raw path only: decode --display-gamma and store 12-bit MSB-aligned\n"
        << "  --max-nits N            HDR PQ scaling reference in cd/m^2 (default: EDID max luminance)\n"
        << "\n"
-       << "Colour handling\n"
+       << "AVIF output\n"
+       << "  --avif-out PATH         Encode to a single AVIF file instead of raw RGBA/Y4M\n"
+       << "  --avif-yuv 444|422|420  Chroma subsampling; libavif does the downsampling (default 444)\n"
+       << "  --avif-cicp P/T/M       Override the CICP primaries/transfer/matrix metadata\n"
+       << "  --avif-clli MAXCLL,MAXFALL\n"
+       << "                          Content light level in cd/m^2 (default: EDID values for HDR)\n"
+       << "\n"
+       << "Color handling\n"
        << "  --edid PATH             Read the display EDID from a file instead of the connector\n"
        << "  --no-edid               Ignore EDID; fall back to --display-* or built-in values\n"
        << "  --display-gamut NAME    Force display primaries (see --list-gamuts)\n"
@@ -110,6 +141,8 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
         out = argv[++i];
         return true;
     };
+
+    bool avif_tuning_given = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -327,11 +360,87 @@ ParseStatus parse_options(int argc, char **argv, Options &opts, std::string &err
                 return ParseStatus::Error;
             }
         }
+        else if (a == "--avif-out")
+        {
+            if (!need_value(i, a, value)) return ParseStatus::Error;
+            opts.avif_out = value;
+        }
+        else if (a == "--avif-yuv")
+        {
+            if (!need_value(i, a, value)) return ParseStatus::Error;
+            const std::string v = to_lower(value);
+            if (v != "444" && v != "422" && v != "420")
+            {
+                error = "--avif-yuv expects 444, 422 or 420";
+                return ParseStatus::Error;
+            }
+            opts.avif.subsampling = v;
+            avif_tuning_given = true;
+        }
+        else if (a == "--avif-cicp")
+        {
+            if (!need_value(i, a, value)) return ParseStatus::Error;
+            int primaries = 0;
+            int transfer = 0;
+            int matrix = 0;
+            if (!parse_slash_triple(value, primaries, transfer, matrix) ||
+                primaries < 0 || primaries > 255 || transfer < 0 || transfer > 255 ||
+                matrix < 0 || matrix > 255)
+            {
+                error = "--avif-cicp expects three integers as P/T/M";
+                return ParseStatus::Error;
+            }
+            opts.avif.cicp_primaries = primaries;
+            opts.avif.cicp_transfer = transfer;
+            opts.avif.cicp_matrix = matrix;
+            avif_tuning_given = true;
+        }
+        else if (a == "--avif-clli")
+        {
+            if (!need_value(i, a, value)) return ParseStatus::Error;
+            int max_cll = 0;
+            int max_pall = 0;
+            if (!parse_comma_pair(value, max_cll, max_pall) ||
+                max_cll < 0 || max_cll > 65535 || max_pall < 0 || max_pall > 65535)
+            {
+                error = "--avif-clli expects MAXCLL,MAXFALL between 0 and 65535";
+                return ParseStatus::Error;
+            }
+            opts.avif.clli = std::make_pair(static_cast<uint16_t>(max_cll),
+                                            static_cast<uint16_t>(max_pall));
+            avif_tuning_given = true;
+        }
         else
         {
             error = "unknown argument '" + a + "'";
             return ParseStatus::Error;
         }
+    }
+
+    const bool avif_mode = !opts.avif_out.empty();
+
+    if (avif_mode && opts.pp_y4m)
+    {
+        error = "--avif-out cannot be combined with --pp-y4m";
+        return ParseStatus::Error;
+    }
+
+    if (avif_mode && opts.write_to_stdout)
+    {
+        error = "--avif-out cannot be combined with --stdout";
+        return ParseStatus::Error;
+    }
+
+    if (avif_mode && opts.sdr_linear_12bpc)
+    {
+        error = "--sdr-linear-12bpc is only for the raw RGBA output path (without --avif-out)";
+        return ParseStatus::Error;
+    }
+
+    if (!avif_mode && avif_tuning_given)
+    {
+        error = "--avif-yuv/--avif-cicp/--avif-clli require --avif-out";
+        return ParseStatus::Error;
     }
 
     if (opts.pp_y4m && opts.sdr_linear_12bpc)

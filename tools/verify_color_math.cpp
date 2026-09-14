@@ -158,12 +158,6 @@ const GamutPreset &preset(const char *name)
 
 int main()
 {
-    if (!have_lcms2())
-    {
-        std::cout << "lcms2 is not available in this build\n";
-        return 1;
-    }
-
     const Chromaticities panel{0.6797, 0.3174, 0.2422, 0.7168, 0.1416, 0.0527, 0.3184, 0.3340};
     const Chromaticities &srgb = preset("srgb").chroma;
     const Chromaticities &bt2020 = preset("bt2020").chroma;

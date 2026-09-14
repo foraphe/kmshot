@@ -6,12 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#if __has_include(<lcms2.h>)
 #include <lcms2.h>
-#define KMSHOT_HAVE_LCMS2 1
-#else
-#define KMSHOT_HAVE_LCMS2 0
-#endif
 
 namespace kmshot
 {
@@ -283,12 +278,6 @@ bool is_valid_chromaticities(const Chromaticities &c)
     return true;
 }
 
-bool have_lcms2()
-{
-    return KMSHOT_HAVE_LCMS2 != 0;
-}
-
-#if KMSHOT_HAVE_LCMS2
 namespace
 {
 
@@ -312,7 +301,6 @@ cmsHPROFILE make_linear_rgb_profile(const Chromaticities &c)
 }
 
 } // namespace
-#endif
 
 std::optional<Mat3> display_to_display_matrix(const Chromaticities &src,
                                               const Chromaticities &dst)
@@ -320,7 +308,6 @@ std::optional<Mat3> display_to_display_matrix(const Chromaticities &src,
     if (!is_valid_chromaticities(src) || !is_valid_chromaticities(dst))
         return std::nullopt;
 
-#if KMSHOT_HAVE_LCMS2
     cmsHPROFILE src_profile = make_linear_rgb_profile(src);
     cmsHPROFILE dst_profile = make_linear_rgb_profile(dst);
     if (!src_profile || !dst_profile)
@@ -363,11 +350,6 @@ std::optional<Mat3> display_to_display_matrix(const Chromaticities &src,
     if (!out.all_finite())
         return std::nullopt;
     return out;
-#else
-    (void)src;
-    (void)dst;
-    return std::nullopt;
-#endif
 }
 
 } // namespace kmshot

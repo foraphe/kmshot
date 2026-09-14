@@ -6,10 +6,13 @@
 #include "drm_util.hpp"
 #include "edid.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <errno.h>
@@ -211,6 +214,24 @@ int main(int argc, char **argv)
     {
         std::cerr << "error: " << error << "\n";
         return 1;
+    }
+
+    // Default the AVIF content light level to the EDID values for HDR captures
+    // unless the user supplied --avif-clli.
+    if (!opts.avif.clli && color->source == SourceEncoding::HdrPqBt2020 &&
+        edid && edid->hdr.has_max_luminance)
+    {
+        const auto to_u16 = [](double v)
+        {
+            return static_cast<uint16_t>(std::lround(std::min(65535.0, std::max(0.0, v))));
+        };
+        const uint16_t max_cll = to_u16(edid->hdr.max_luminance);
+        const uint16_t max_pall = edid->hdr.has_max_frame_avg_luminance
+                                      ? to_u16(edid->hdr.max_frame_avg_luminance)
+                                      : max_cll;
+        opts.avif.clli = std::make_pair(max_cll, max_pall);
+        std::cerr << "AVIF CLLI from EDID: MaxCLL=" << max_cll
+                  << " MaxPALL=" << max_pall << " cd/m^2\n";
     }
 
     return run_capture(opts, card.fd, *color, colorspace_idx, region, *selected);

@@ -58,12 +58,9 @@ bool is_valid_chromaticities(const Chromaticities &c);
 
 // Linear RGB -> linear RGB matrix from one set of display primaries to
 // another. Backed by LittleCMS2 (relative colorimetric intent, which applies
-// Bradford chromatic adaptation between the two white points). Returns
-// std::nullopt when the profiles cannot be built.
+// Bradford chromatic adaptation between the two white points), which is a hard
+// build dependency. Returns std::nullopt when the profiles cannot be built.
 std::optional<Mat3> display_to_display_matrix(const Chromaticities &src,
                                               const Chromaticities &dst);
-
-// Whether the LittleCMS2 backed path is available in this build.
-bool have_lcms2();
 
 } // namespace kmshot
