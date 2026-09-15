@@ -37,6 +37,7 @@ The checks cover the EDID decoder (against a real panel, cross-checked with `edi
 
 ### Usage
 To use this tool, the executable will need to either have `cap_sys_admin` or be run as root. In the future there will be a separated helper binary that prevents the main binary from needing excessive permissions.
+
 Example usage:
 SDR capture encoded to a 10-bit AVIF by the tool itself (needs caution, see "Important Notes on Color Accuracy" below):
 ```bash
@@ -51,6 +52,7 @@ sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
 ```
 
 MaxCLL/MaxPALL default to the monitor's EDID values; pass `--avif-clli <MaxCLL,MaxFALL>` to override them.
+
 [slurp](https://github.com/emersion/slurp) can be used to select the capture area when used with compatible Wayland compositors. Since `slurp` will output logical coordinates after display scaling, the `--slurp-scale` option can be used to scale the coordinates to framebuffer pixels. For example, on a display with 1.25x scaling, the following command will capture a single frame of the selected area and encode it to AVIF: 
 ```bash
 slurp | sudo ./kms_capture --card /dev/dri/card0 --frames 1 \
